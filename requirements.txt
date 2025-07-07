@@ -11,3 +11,5 @@ torch~=2.0
 tqdm~=4.0
 tensorboard~=2.13
 munch~=4.0
+dandi~=0.69
+git+https://github.com/neurallatents/nlb_tools.git
