@@ -23,7 +23,7 @@ We’ll start by applying our model to artificially generated data. Because the 
 
 $$
 \begin{align}
-\mathbf{x}_{t+1} = \text{Lorenz}(\mathbf{x}(t)) \\
+\mathbf{x}_{t+1} &= \text{Lorenz}(\mathbf{x}(t)) \\
 \boldsymbol{\lambda}(t) &= \exp(\mathbf{C}\mathbf{x}(t) + \mathbf{d}) \\
 \mathbf{y}(t) &\sim \text{Poisson}(\boldsymbol{\lambda}(t))
 \end{align}
@@ -33,6 +33,7 @@ The Lorenz dataset has become something of a standard for debugging models that 
 """
 # %%
 import pickle
+from tkinter.constants import TRUE
 
 from pandas.core.missing import mask_missing
 
@@ -81,12 +82,14 @@ Our job will be to learn a model that can take spike data, like the one on the l
 """
 # %% [markdown]
 """
+# Building a transformer auto-encoder
+
 Our first order of business is to create a model that can take in spike data and return (denoised) spike data: an auto-encoder.
 This is going to be the scheme for our auto-encoder:
 
-* We take one trial worth of spike data (n_timepoints, n_neurons) and embed into a series of tokens (n_tokens, latent_dim)
+* We take one trial worth of spike data (`n_timepoints`, `n_neurons`) and embed into a series of tokens (`n_tokens`, `latent_dim`)
 * We pass these tokens through a series of transformer layers. These transformer layers can peak into data from any timepoint and any neuron, and return a new set of tokens (n_tokens, latent_dim)
-* At the end, we then decode back into spike data (n_timepoints, n_neurons)
+* At the end, we then decode back into spike data (`n_timepoints`, `n_neurons`)
 
 We'll have done well if our autoencoder gives us back a denoised version of the input spike data.
 
@@ -136,10 +139,9 @@ class SimpleTransformerAutoencoder(nn.Module):
 
         self.encoder_layers = nn.ModuleList([create_encoder_layer() for _ in range(num_layers)])
         self.norm = nn.LayerNorm(input_dim)
+        
         # This projects the output back to the input dimension
         self.output_projection = nn.Linear(input_dim, input_dim)
-
-        # This is for regularization. We use dropout at multiple points in the network
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -483,6 +485,8 @@ plt.show()
 
 # %% [markdown]
 """
+TODO: revisit this to figure out what's going wrong exactly. It shouldn't work *well*, but it should work slightly better.
+
 Either fix this or justify why this works very poorly. Now add the embedding linear layer:
 """
 # %%
@@ -523,14 +527,21 @@ class TransformerAutoencoder(nn.Module):
         self.output_projection = nn.Linear(hidden_dim, input_dim)
 
         # This is for regularization. We use dropout at multiple points in the network
+        self.reset_dropout(dropout)
+
+    def reset_dropout(self, dropout: float):
+        # This is for regularization. We use dropout at multiple points in the network. We have
+        # a separate method to easily change dropout, eventually, which will be useful for fine-tuning.
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, return_latents=False):
+    def forward(self, x: torch.Tensor, return_latents=False, mask=None):
         """
         Forward pass of the transformer autoencoder.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
+            return_latents: If True, return the latents (the output of the transformer encoder)
+            mask: Optional mask tensor of shape (batch_size, seq_len) to apply to the input
             
         Returns:
             Reconstructed tensor of shape (batch_size, seq_len, input_dim)
@@ -539,12 +550,12 @@ class TransformerAutoencoder(nn.Module):
 
         # Project input and add positional encoding
         x = self.dropout(x)  
-        x = math.sqrt(self.input_dim) * self.input_projection(x) + self.get_positional_encoding(seq_len).unsqueeze(0)
+        x = math.sqrt(self.hidden_dim) * self.input_projection(x) + self.get_positional_encoding(seq_len).unsqueeze(0)
         x = self.dropout(x)
         
         # Pass through transformer encoder layers
         for layer in self.encoder_layers:
-            x = layer(x)
+            x = layer(x, mask)
 
         x = self.norm(x) # Final layer normalization
         if return_latents: 
@@ -560,7 +571,7 @@ class TransformerAutoencoder(nn.Module):
 
 net = TransformerAutoencoder(
     input_dim=n_neurons,
-    hidden_dim=256,
+    hidden_dim=128,
     num_layers=4,  
     num_heads=1, 
     ffn_dim=128, 
@@ -584,11 +595,12 @@ train_network(
 
 # %%
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-visualize_index = 2
-net.eval()
+
+visualize_index = 0
 example_batch = torch.tensor(dataset['val_data'][visualize_index:visualize_index+1, :, :]).int().to(device)
 true_rates = torch.tensor(dataset['val_truth'][visualize_index:visualize_index+1, :, :]).to(device)
 
+net.eval()
 estimated_spike_log_rates = net(example_batch.float())
 estimated_spike_rates = torch.exp(estimated_spike_log_rates).detach().cpu().numpy()[0]
 
@@ -597,21 +609,21 @@ plt.subplot(4, 1, 1)
 plt.imshow(example_batch[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
 plt.title("Input spikes")
 plt.subplot(4, 1, 2)
-plt.imshow(true_rates[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
+plt.imshow(torch.log(true_rates[0]).detach().cpu().numpy().T, aspect="auto", origin="lower")
 plt.title("Ground truth latents")
 plt.subplot(4, 1, 3)
 plt.imshow(estimated_spike_rates.T, aspect="auto", origin="lower")
 plt.title("Model prediction")
 plt.subplot(4, 1, 4)
-plt.plot([0, 6], [0, 7], 'k-')
-plt.plot(estimated_spike_rates.T.ravel(), true_rates[0].detach().cpu().numpy().T.ravel(), '.')
+plt.plot(estimated_spike_rates.T.ravel(), true_rates[0].detach().cpu().numpy().T.ravel(), '.', markersize=2)
 plt.xlabel("Estimated spike rates")
 plt.ylabel("True spike rates")
+plt.tight_layout()
 plt.show()
 
 # %% [markdown]
 """
-That looks even better. An advantage of doing the autoencoding in latent space is that we can flexibly change the latent dimensionality of the network, increasing the capacity of the model without affecting the number of layers. 
+That looks better. An advantage of doing the autoencoding in latent space is that we can flexibly change the latent dimensionality of the network, increasing the capacity of the model without affecting the number of layers. 
 
 Does the latent space encode something interesting about the dynamical system that generated this data? Transformers have a reputation as black boxes, but nothing prevents us from looking at what's inside the models to learn about how they operate. We can verify this by looking at the weights of the model. Let's use PCA to determine the measure the top PCs of the input embedding matrix and the output readout matrix.
 """
@@ -622,26 +634,42 @@ Wo = net.output_projection.weight.detach().cpu().numpy()
 Ui, Si, Vi = np.linalg.svd(Wi, full_matrices=False)
 Uo, So, Vo = np.linalg.svd(Wo, full_matrices=False)
 
+def rectify(x):
+    """Rectify a matrix by setting negative values to zero."""
+    return x * np.sign(x.mean(axis=0, keepdims=True))
+
 plt.figure(figsize=(8, 8))
 plt.subplot(2, 2, 1)
 plt.plot(Si, 'o-', label='Input embedding singular values')
+plt.xlabel('Singular value index')
+plt.title('Input embedding singular values')
 plt.subplot(2, 2, 2)
 plt.plot(So, 'o-', label='Output readout singular values')
+plt.xlabel('Singular value index')
+plt.title('Output readout singular values')
 plt.subplot(2, 2, 3)
-plt.imshow(Ui[:, :3], aspect='auto', origin='lower')
+plt.plot(rectify(Vi[:3, :].T))
+plt.xlabel('Neuron #')
+plt.ylabel('Loading')
 plt.title('Top 3 input projection singular vectors')
-plt.subplot(2, 2, 3)
-plt.imshow(Uo[:, :3], aspect='auto', origin='lower')
+plt.subplot(2, 2, 4)
+plt.plot(rectify(Uo[:, :3]))
+plt.xlabel('Neuron #')
+plt.ylabel('Loading')
 plt.title('Top 3 output projection singular vectors')
+plt.tight_layout()
 
 # %% [markdown]
 """
-Notice that the singular values of the input and output embedding matrices fall off dramatically after the 3rd singular value. Interestingly, the Lorenz dynamical system is 3-dimensional, so this suggests that the model has learned to embed the data in a 3-dimensional latent space.
+Notice the singular values of the input and output embedding matrices fall off dramatically after the 2nd (input) or 3rd (output) singular value. Interestingly, the Lorenz dynamical system is 3-dimensional, with 2 dimensions capturing most of the variance; the model has learned to embed the data in a 3-dimensional latent space.
 
-Notice also the structure of the input and output projection singular vectors. They are highly structured, and indeed seem to distinguish the first half of the neurons from the second half. You will notice that this reflects the structure of the observations, where the loadings of the first half of the neurons are different than those of the second half.
+Notice also the structure of the input and output projection singular vectors. They are highly structured, and indeed seem to distinguish three groups of neurons: neurons 1-10, neurons 11-15, and neurons 16-29. If you look closely at the ground truth data, you'll notice that indeed the spike rates display this same grouping, which is a reflection of how the data was generated.
 
-Thus, it appears that one of the things the model has learned is that the data lies on a low-rank manifold, a core assumption of many models that learn structure from neural data, including PCA, LFADS, and GPFA.
+Thus, it appears the model has leveraged the fact that the data lies on a low-rank manifold, a core assumption of many models that learn structure from neural data, including PCA, LFADS, and GPFA.
+"""
 
+# %% [markdown]
+"""
 # Real data: `mc_maze`
 
 Now that we've gotten a handle on working with toy data, let's switch over to real data. A typical experiment where you might want to apply a foundation model for neuroscience is a BCI decoding experiment. In the `mc_maze` series of datasets (`mc_maze`, `mc_maze_large`, `mc_maze_medium`, `mc_maze_small`), a monkey completes a reaching task where he needs to trace with his finger on a touchscreen from a start position to an end position, avoiding the maze walls. Neurons are recorded in premotor cortex (PMd) and in M1. 
@@ -654,14 +682,14 @@ The data is similarly structured to the Lorenz dataset, with a few key differenc
 Let's start by visualizing this data.
 """
 # %%
-import matplotlib.pyplot as plot
+import matplotlib.pyplot as plt
 
-dataset = load_dataset("mc_maze_large")
+dataset = load_dataset("mc_maze_medium")
 
 # One figure, two axes stacked vertically
 fig, (ax_top, ax_bottom) = plt.subplots(
     nrows=2, ncols=2,           # two rows, one column
-    gridspec_kw={'height_ratios': [1, 2], 'width_ratios': [2, 1]},  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
+    gridspec_kw={'height_ratios': [1, 2], 'width_ratios': [1, 1]},  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
     figsize=(6, 8),             # any size you like
     sharex=False                 # optional: share the x-axis
 )
@@ -671,13 +699,15 @@ bin_size = .01
 ax_top[0].plot(np.arange(dataset['val_behavior'].shape[1]) * bin_size, dataset['val_behavior'][0, :])
 ax_top[0].legend(['Velocity (x)', 'Velocity (y)'])
 ax_top[0].set_xlim(0, dataset['train_behavior'].shape[1] * bin_size)
-ax_top[0].set_ylim(-600, 600)
+ax_top[0].set_ylim(-1, 1)
+ax_top[0].set_xlabel('Time (s)')
+ax_top[0].set_ylabel('Velocity (m/s)')
 
-ax_top[1].plot(np.cumsum(dataset['val_behavior'][0, :, 0]), np.cumsum(dataset['val_behavior'][0, :, 1]), '-.')
-ax_top[1].set_xlabel('position (x)')
-ax_top[1].set_ylabel('position (y)')
-ax_top[1].set_xlim([-10000, 10000])
-ax_top[1].set_ylim([-10000, 10000])
+ax_top[1].plot(bin_size * np.cumsum(dataset['val_behavior'][0, :, 0]), bin_size * np.cumsum(dataset['val_behavior'][0, :, 1]), '-.')
+ax_top[1].set_xlabel('x position (m)')
+ax_top[1].set_ylabel('y position (m)')
+ax_top[1].set_xlim([-.2, .2])
+ax_top[1].set_ylim([-.2, .2])
 ax_top[1].plot(np.cumsum(dataset['val_behavior'][0, :, 0])[-1], np.cumsum(dataset['val_behavior'][0, :, 1])[-1], 'gx')  # mark the end
 ax_top[1].plot(0, 0, 'ro')
 
@@ -691,6 +721,8 @@ ax_bottom[1].set_xlabel('Time (s)')
 ax_bottom[1].set_ylabel('Neuron #')
 ax_bottom[1].set_title('Ground truth (smoothed data)')
 
+plt.tight_layout()
+
 # %% [markdown]
 """
 We can proceed as we did previously to train a masked autoencoder on this data. 
@@ -699,15 +731,15 @@ We can proceed as we did previously to train a masked autoencoder on this data.
 net = TransformerAutoencoder(
     input_dim=dataset['train_data'].shape[2],
     hidden_dim=256,
-    num_layers=4,  
-    num_heads=1, 
+    num_layers=6,  
+    num_heads=2, 
     ffn_dim=128, 
     dropout=0.7, 
-    max_seq_len=50, 
+    max_seq_len=70, 
 )
-batch_size = 64
-lr = 2e-3  # Learning rate
-epochs = 100  # Number of epochs to train
+batch_size = 32
+lr = 1e-2  # Learning rate
+epochs = 1000  # Number of epochs to train
 mask_ratio = 0.25
 
 # Train the network
@@ -720,11 +752,14 @@ train_network(
     mask_ratio=mask_ratio
 )
 
+# To easily recover the model once we've trained it.
+saved_state_dict = {k: v.cpu().detach().clone() for k, v in net.state_dict().items()}
+
 # %% [markdown]
 """
-That worked! Now we have a good representation of the data, but we are not yet able to decode the behavior, for example for a brain computer interface.
+That worked! Now we have a reasonable representation of the data, but we are not yet able to decode the behavior, for example for a brain computer interface.
 
-So how could we use this BCI decoding with transformers? Well, we could:
+So how could we use this for BCI decoding with transformers? Well, we could:
 
 * Supervised learning: Train a transformer from scratch end-to-end to predict the desired behavior
 * Supervised learning + auxillary loss: Train a transformer to both reconstruct the input AND predict the desired behavior
@@ -743,12 +778,10 @@ class TransformerWithDecoder(nn.Module):
         transformer: nn.Module,
         behavior_dim: int,
         freeze_transformer: bool = True,
-        passthrough: bool = False,
         target_layer: int = -1,
         input_dim: int = None,
     ):
         super().__init__()
-        self.passthrough = passthrough
         self.transformer = transformer
         self.target_layer = target_layer
 
@@ -777,7 +810,7 @@ class TransformerWithDecoder(nn.Module):
             Tuple of (reconstructed spikes, decoded behavior)
         """
         # Get internal representations
-        _, h = net.forward(x=x, return_latents=True)
+        _, h = self.transformer.forward(x=x, return_latents=True)
             
         # Decode behavior from representations
         behavior = self.decoder(h)
@@ -822,14 +855,14 @@ def train_one_epoch(
     
     criterion_mse = nn.MSELoss()
     
-    for spikes, _, behavior in loader:
+    for spikes, behavior in loader:
         spikes = spikes.to(device).float()
         behavior = behavior.to(device).float()
         
         optimizer.zero_grad()
         
         # Forward pass
-        _, pred_behavior = model(spikes)
+        pred_behavior = model(spikes)
         
         # Compute loss
         loss = criterion_mse(pred_behavior, behavior)
@@ -860,12 +893,12 @@ def evaluate(
     criterion_mse = nn.MSELoss()
     
     with torch.no_grad():
-        for spikes, _, behavior in loader:
+        for spikes, behavior in loader:
             spikes = spikes.to(device).float()
             behavior = behavior.to(device).float()
             
             # Forward pass
-            _, pred_behavior = model(spikes)
+            pred_behavior = model(spikes)
             
             # Compute metrics
             loss = criterion_mse(pred_behavior, behavior)
@@ -890,7 +923,7 @@ def train_bci_decoder(
         ),
         batch_size=batch_size,
         shuffle=True,
-        drop_last=False
+        drop_last=True
     )
     val_loader = DataLoader(
         TensorDataset(
@@ -907,9 +940,13 @@ def train_bci_decoder(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=lr * 0.1  # Use lower learning rate for fine-tuning
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=1)
-    for epoch in range(1, \epochs + 1):
-        # Switch to end-to-end training after decoder-only epochs        
+    scheduler = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=int(epochs * 0.1),  # 10% of total epochs as warmup
+        t_total=epochs,
+    )
+    best_val_r2 = -float("inf")
+    for epoch in range(1, epochs + 1):
         train_loss, train_r2 = train_one_epoch(
             model, train_loader, device, optimizer
         )
@@ -919,40 +956,55 @@ def train_bci_decoder(
             f"train loss {train_loss:.4f} | train R² {train_r2:.4f} | "
             f"val loss {val_loss:.4f} | val R² {val_r2:.4f}"
         )
-        scheduler.step(val_r2)
-    return model
+        scheduler.step()
+        if val_r2 > best_val_r2:
+            best_val_r2 = val_r2
+            best_model = {k: v.cpu().detach().clone() for k, v in model.state_dict().items()}
+    model.load_state_dict(best_model)
+    return model, best_val_r2
 
 
-# %% [markdown]
+# % [markdown]
 """
 Now we're ready to train the model. We'll use two different training modes:
 * Frozen encoder: We freeze the transformer encoder and only train the decoder. This is useful for transfer learning, where we want to leverage the pretrained representations.
 * End-to-end training: We unfreeze the transformer encoder and train the entire model end-to-end. This is useful for fine-tuning the model on the specific task.
 """
 
-# %%
+# %
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+results = []
 for frozen_encoder in [True, False]:
     # Create the model with frozen transformer
     print(f"Training with {'frozen' if frozen_encoder else 'unfrozen'} transformer encoder")
+    
+    # Load the pretrained transformer autoencoder.
+    net.load_state_dict(saved_state_dict)
+    net.reset_dropout(0.1)  # Reset dropout to a lower value for fine-tuning
     model = TransformerWithDecoder(
         transformer=net,
-        behavior_dim=dataset['train_behavior'].shape[1],
+        behavior_dim=dataset['train_behavior'].shape[2],
         freeze_transformer=frozen_encoder,  # Freeze the transformer encoder
         passthrough=False,  # Don't pass through the input spikes
     )
     model = model.to(device)
 
     batch_size = 64
-    lr = 1e-3  # Learning rate
-    epochs = 50  # Number of epochs to train
+    lr = 1e-2  # Learning rate
+    epochs = 500  # Number of epochs to train
     # Train the model with frozen transformer
-    model = train_bci_decoder(
+    model, best_r2 = train_bci_decoder(
         model,
         dataset,
         batch_size=batch_size,
         lr=lr,
         epochs=epochs,
+    )
+    results.append(
+        {
+            'method': 'frozen' if frozen_encoder else 'end-to-end',
+            'best_val_r2': best_r2
+        }
     )
 
 # %% [markdown]
@@ -969,6 +1021,9 @@ Let's make up two baselines:
 Then we'll have a clear baseline to compare against.
 """
 # %%
+from torch import nn
+import torch.nn.functional as F
+
 def gaussian_smooth_1d(x, sigma=5):
     """
     Apply Gaussian smoothing along the time dimension.
@@ -1014,7 +1069,7 @@ def gaussian_smooth_1d(x, sigma=5):
 
 class SmoothDecoder(nn.Module):
     def __init__(self, input_dim, output_dim, sigma):
-
+        super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.sigma = sigma
@@ -1040,16 +1095,17 @@ class SmoothDecoder(nn.Module):
 # Train the model with a smooth decoder
 
 batch_size = 64
-lr = 1e-3  # Learning rate
-epochs = 50  # Number of epochs to train
+lr = 5e-2  # Learning rate
+epochs = 500  # Number of epochs to train
 # Train the model with frozen transformer
 model = SmoothDecoder(
     input_dim=dataset['train_data'].shape[2],
-    output_dim=dataset['train_behavior'].shape[1],
+    output_dim=dataset['train_behavior'].shape[2],
     sigma=5,  # Standard deviation for Gaussian smoothing
 )
+model.to(device)
 
-model = train_bci_decoder(
+model, val_r2 = train_bci_decoder(
     model,
     dataset,
     batch_size=batch_size,
@@ -1057,25 +1113,46 @@ model = train_bci_decoder(
     epochs=epochs,
 )
 
-net = TransformerAutoencoder(
+results.append(
+    {
+        'method': 'smooth',
+        'best_val_r2': val_r2
+    }
+)
+
+# %%
+lr = 1e-1  # Learning
+epochs = 1000  # Number of epochs to train
+supervised_net = TransformerAutoencoder(
     input_dim=dataset['train_data'].shape[2],
-    hidden_dim=256,
+    hidden_dim=32,
     num_layers=4,
     num_heads=1,
     ffn_dim=128,
-    dropout=0.7
+    dropout=0.1
 )
 
 # Train with a transformer decoder from scratch
-model = TransformerWithDecoder(transformer=net)
+model = TransformerWithDecoder(
+    transformer=supervised_net,
+    behavior_dim=dataset['train_behavior'].shape[2],
+    freeze_transformer=False,  # Unfreeze the transformer encoder
+)
 model = model.to(device)
 
-model = train_bci_decoder(
+model, val_r2 = train_bci_decoder(
     model,
     dataset,
     batch_size=batch_size,
     lr=lr,
     epochs=epochs,
+)
+
+results.append(
+    {
+        'method': 'supervised_transformer',
+        'best_val_r2': val_r2
+    }
 )
 
 # %% [markdown]
