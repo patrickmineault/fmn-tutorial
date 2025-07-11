@@ -5,3 +5,8 @@ scripts/lightning_logs/*
 .env
 scripts/wandb
 scripts/runs
+events.*
+*.pt
+*.pkl
+*.nwb
+dandiset.yaml
