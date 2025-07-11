@@ -33,9 +33,6 @@ The Lorenz dataset has become something of a standard for debugging models that 
 """
 # %%
 import pickle
-from tkinter.constants import TRUE
-
-from pandas.core.missing import mask_missing
 
 def load_dataset(name):
     with open(f"data/{name}_data.pkl", "rb") as f:
@@ -66,7 +63,6 @@ fig, axes = plt.subplots(
 )
 
 axes[0].imshow(dataset['val_data'][0, :, :].T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-#axes[0].set_xlabel('Time (s)')
 axes[0].set_ylabel('Neuron #')
 axes[0].set_title('Spikes')
 
@@ -235,7 +231,7 @@ fig, axes = plt.subplots(3, 1, figsize=(8, 8))
 # Since we have a single sequence, we'll plot as line plots for clarity
 time_axis = np.arange(original_data.shape[1])
 
-axes[0].imshow(original_data.squeeze().numpy().T)
+axes[0].imshow(original_data.squeeze().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
 axes[0].set_title('Original Data (Non-masked)', fontsize=14, fontweight='bold')
 axes[0].set_xlabel('Time Steps')
 axes[0].set_ylabel('Spike Value')
@@ -247,7 +243,7 @@ axes[1].set_xlabel('Time Steps')
 axes[1].set_ylabel('Mask Value')
 axes[1].grid(True, alpha=0.3)
 
-axes[2].imshow(masked_data.squeeze().T)
+axes[2].imshow(masked_data.squeeze().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
 axes[2].set_title('Masked Data', fontsize=14, fontweight='bold')
 axes[2].set_xlabel('Time Steps')
 axes[2].set_ylabel('Spike Value')
@@ -374,6 +370,30 @@ def evaluate(
 
     return float(np.mean(losses)), float(np.mean(r2s))
 
+def circshift_collate_fn(batch, delta=1):
+    def fun(batch):
+        """Vectorized version for better performance"""
+        data_list, truth_list = zip(*batch)
+        
+        data = torch.stack(data_list)
+        truth = torch.stack(truth_list)
+        
+        batch_size = data.size(0)
+        seq_len = data.size(1)
+        
+        # Generate random shifts for each sample
+        shifts = torch.randint(-delta, delta + 1, (batch_size,))
+        
+        # Apply shifts using advanced indexing
+        indices = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+        shifted_indices = (indices - shifts.unsqueeze(1)) % seq_len
+        
+        # Apply the shifts
+        data = data.gather(1, shifted_indices.unsqueeze(-1).expand(-1, -1, data.size(-1)))
+        return data, truth
+
+    return fun
+
 def train_network(net, data, batch_size, lr, epochs, mask_ratio):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = net.to(device)
@@ -391,7 +411,7 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
         print("No ground truth for val data available")
     train_truth = torch.from_numpy(data.get("train_truth", train_data.numpy()))
 
-    train_loader = DataLoader(TensorDataset(train_data, train_truth), batch_size=batch_size, shuffle=True, drop_last=False)
+    train_loader = DataLoader(TensorDataset(train_data, train_truth), batch_size=batch_size, shuffle=True, drop_last=False, collate_fn=circshift_collate_fn(3))
     val_loader = DataLoader(TensorDataset(val_data, val_truth), batch_size=batch_size, shuffle=False)
 
     criterion = nn.PoissonNLLLoss(reduction="none", log_input=True)
@@ -405,24 +425,25 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
 
     best_val_loss = float("inf")
 
-    for epoch in range(1, epochs):
+    for epoch in tqdm(range(1, epochs + 1), desc="Training", unit="epoch"):
         
         train_loss = train_one_epoch(
             net, train_loader, device, criterion, optimizer, mask_ratio=mask_ratio
         )
-        val_loss, val_r2 = evaluate(
-            net, val_loader, device, criterion, 
-            mask_ratio=mask_ratio, 
-            has_ground_truth=has_ground_truth
-        )
+        if epoch % 10 == 0:
+            val_loss, val_r2 = evaluate(
+                net, val_loader, device, criterion, 
+                mask_ratio=mask_ratio, 
+                has_ground_truth=has_ground_truth
+            )
 
-        tqdm.write(
-            f"Epoch {epoch:03d} | train NLL {train_loss:.4f} | val NLL {val_loss:.4f} | val R² {val_r2:.4f}"
-        )
+            tqdm.write(
+                f"Epoch {epoch:03d} | train NLL {train_loss:.4f} | val NLL {val_loss:.4f} | val R² {val_r2:.4f}"
+            )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model = {k: v.cpu().detach().clone() for k, v in net.state_dict().items()}
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model = {k: v.cpu().detach().clone() for k, v in net.state_dict().items()}
             
         scheduler.step()
 
@@ -473,13 +494,13 @@ estimated_spike_rates = torch.exp(estimated_spike_log_rates).detach().cpu().nump
 
 plt.figure(figsize=(4, 12))
 plt.subplot(3, 1, 1)
-plt.imshow(example_batch[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
+plt.imshow(example_batch[0].detach().cpu().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
 plt.title("Input spikes")
 plt.subplot(3, 1, 2)
-plt.imshow(true_rates[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
+plt.imshow(true_rates[0].detach().cpu().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
 plt.title("Ground truth latents")
 plt.subplot(3, 1, 3)
-plt.imshow(estimated_spike_rates.T, aspect="auto", origin="lower")
+plt.imshow(estimated_spike_rates.T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
 plt.title("Model prediction")
 plt.show()
 
@@ -609,7 +630,7 @@ plt.subplot(4, 1, 1)
 plt.imshow(example_batch[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
 plt.title("Input spikes")
 plt.subplot(4, 1, 2)
-plt.imshow(torch.log(true_rates[0]).detach().cpu().numpy().T, aspect="auto", origin="lower")
+plt.imshow(true_rates[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
 plt.title("Ground truth latents")
 plt.subplot(4, 1, 3)
 plt.imshow(estimated_spike_rates.T, aspect="auto", origin="lower")
@@ -728,6 +749,10 @@ plt.tight_layout()
 We can proceed as we did previously to train a masked autoencoder on this data. 
 """
 # %%
+# For reproducibility. This model is somewhat finicky, and doesn't always converge. In practice 
+# one might want to pick several random seeds and pick the best outcome. That would take a long time,
+# so here we just set a fixed seed.
+torch.manual_seed(42)  
 net = TransformerAutoencoder(
     input_dim=dataset['train_data'].shape[2],
     hidden_dim=256,
@@ -778,12 +803,9 @@ class TransformerWithDecoder(nn.Module):
         transformer: nn.Module,
         behavior_dim: int,
         freeze_transformer: bool = True,
-        target_layer: int = -1,
-        input_dim: int = None,
     ):
         super().__init__()
         self.transformer = transformer
-        self.target_layer = target_layer
 
         hidden_dim = transformer.hidden_dim
             
@@ -842,7 +864,7 @@ def compute_r2(pred: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
     
     return torch.stack(r2_per_dim).mean()
 
-def train_one_epoch(
+def finetune_one_epoch(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
@@ -880,7 +902,7 @@ def train_one_epoch(
     return float(np.mean(epoch_losses)), float(np.mean(epoch_r2s))
 
 
-def evaluate(
+def finetune_evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
@@ -909,7 +931,7 @@ def evaluate(
     
     return float(np.mean(losses)), float(np.mean(r2s))
 
-def train_bci_decoder(
+def finetune_bci_decoder(
         model: nn.Module,
         dataset,
         batch_size,
@@ -946,20 +968,21 @@ def train_bci_decoder(
         t_total=epochs,
     )
     best_val_r2 = -float("inf")
-    for epoch in range(1, epochs + 1):
-        train_loss, train_r2 = train_one_epoch(
+    for epoch in tqdm(range(1, epochs + 1), desc="Training", unit="epoch"):
+        train_loss, train_r2 = finetune_one_epoch(
             model, train_loader, device, optimizer
         )
-        val_loss, val_r2 = evaluate(model, val_loader, device)
-        tqdm.write(
-            f"Epoch {epoch:03d} | "
-            f"train loss {train_loss:.4f} | train R² {train_r2:.4f} | "
-            f"val loss {val_loss:.4f} | val R² {val_r2:.4f}"
-        )
         scheduler.step()
-        if val_r2 > best_val_r2:
-            best_val_r2 = val_r2
-            best_model = {k: v.cpu().detach().clone() for k, v in model.state_dict().items()}
+        if epoch % 10 == 0:
+            val_loss, val_r2 = finetune_evaluate(model, val_loader, device)
+            tqdm.write(
+                f"Epoch {epoch:03d} | "
+                f"train loss {train_loss:.4f} | train R² {train_r2:.4f} | "
+                f"val loss {val_loss:.4f} | val R² {val_r2:.4f}"
+            )
+            if val_r2 > best_val_r2:
+                best_val_r2 = val_r2
+                best_model = {k: v.cpu().detach().clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_model)
     return model, best_val_r2
 
@@ -985,15 +1008,14 @@ for frozen_encoder in [True, False]:
         transformer=net,
         behavior_dim=dataset['train_behavior'].shape[2],
         freeze_transformer=frozen_encoder,  # Freeze the transformer encoder
-        passthrough=False,  # Don't pass through the input spikes
     )
     model = model.to(device)
 
     batch_size = 64
-    lr = 1e-2  # Learning rate
+    lr = 5e-2  # Learning rate
     epochs = 500  # Number of epochs to train
     # Train the model with frozen transformer
-    model, best_r2 = train_bci_decoder(
+    model, best_r2 = finetune_bci_decoder(
         model,
         dataset,
         batch_size=batch_size,
@@ -1002,7 +1024,7 @@ for frozen_encoder in [True, False]:
     )
     results.append(
         {
-            'method': 'frozen' if frozen_encoder else 'end-to-end',
+            'method': 'linear on top of frozen mc_maze_medium checkpoint' if frozen_encoder else 'fine-tune from mc_maze_medium checkpoint (end-to-end)',
             'best_val_r2': best_r2
         }
     )
@@ -1011,7 +1033,7 @@ for frozen_encoder in [True, False]:
 """
 Great! We see that the performance of the BCI decoder is quite a bit better when the model is trained end-to-end than when it is trained with a frozen encoder. This is expected, as the model can adapt the representations to the specific task.
 
-But how well does the model perform on the BCI decoding task? We have to compare our model against baselines!
+But how well does the model perform on the BCI decoding task compared to alternatives? We have to compare our model against baselines!
 
 Let's make up two baselines:
 
@@ -1105,7 +1127,7 @@ model = SmoothDecoder(
 )
 model.to(device)
 
-model, val_r2 = train_bci_decoder(
+model, val_r2 = finetune_bci_decoder(
     model,
     dataset,
     batch_size=batch_size,
@@ -1115,12 +1137,13 @@ model, val_r2 = train_bci_decoder(
 
 results.append(
     {
-        'method': 'smooth',
+        'method': 'linear on top of smoothed spikes',
         'best_val_r2': val_r2
     }
 )
 
 # %%
+# Train a transformer decoder from scratch
 lr = 1e-1  # Learning
 epochs = 1000  # Number of epochs to train
 supervised_net = TransformerAutoencoder(
@@ -1140,7 +1163,7 @@ model = TransformerWithDecoder(
 )
 model = model.to(device)
 
-model, val_r2 = train_bci_decoder(
+model, val_r2 = finetune_bci_decoder(
     model,
     dataset,
     batch_size=batch_size,
@@ -1150,14 +1173,20 @@ model, val_r2 = train_bci_decoder(
 
 results.append(
     {
-        'method': 'supervised_transformer',
+        'method': 'supervised',
         'best_val_r2': val_r2
     }
 )
 
 # %% [markdown]
 """
-Great! **Write some hard-earned lessons here**.
+We notice a few important trends:
+
+* The fine-tuned model performs better than the frozen model, which is expected since it can adapt the representations to the specific task.
+* The smooth linear decoder underperforms compared to the fine-tuned model, which is expected since it does not leverage the pretrained representations.
+* The supervised transformer decoder performs a bit better then the fine-tuned model
+
+This is a bit disappointing, since we want our pretrained model to allow us better transfer than training from scratch. It's not too surprising, however: the `mc_maze_medium` dataset is fairly small, and so the pretraining doesn't help much. The promise of a foundation model is to pretrain on a large dataset---potentially many orders of magnitude larger than the fine-tuning task---, and then fine-tune on the smaller dataset. Let's do that next.
 
 # Transfer learning from a larger model
 
@@ -1174,21 +1203,28 @@ Although the `mc_maze` series of datasets were all collected in the animal with 
 Then we'll go ahead and train the model and see how well it performs on the new dataset.
 """
 # %%
+import argparse
+
 # Load the pretrained model
 net = TransformerAutoencoder(
     input_dim=dataset['train_data'].shape[2],
     hidden_dim=256,
     num_layers=6,
     num_heads=2,
-    ffn_dim=128,
+    ffn_dim=256,
     dropout=0.1,
-    max_seq_len=50,
+    max_seq_len=70,
 )
 
 # Here's the tricky part: we'll overwrite the input and output projection layers to match the new number of neurons
-pretrained_model_path = "path/to/pretrained_model.pth"  # Adjust this path
-ckpt = torch.load("pretrained_model_path", map_location=device)
-net.load_state_dict(ckpt, strict=False)
+torch.serialization.add_safe_globals([argparse.Namespace])
+pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
+ckpt = torch.load(pretrained_model_path, map_location=device)
+state_dict = ckpt['model_state_dict']
+try:
+    net.load_state_dict(state_dict, strict=True)
+except RuntimeError as e:
+    print(f"Error loading state dict: {e}")
 
 # %% [markdown]
 """
@@ -1196,44 +1232,48 @@ Notice that this returned an error, because the input and output projection laye
 """
 # %%
 # The input and output projection layers need to match the new number of neurons, so we'll just use the weights that are already in the model.
-ckpt['input_projection'] = net.input_projection.weight.data.detach().cpu().numpy()
-ckpt['output_projection'] = net.input_projection.weight.data.detach().cpu().numpy()
-net.load_state_dict(ckpt, strict=False)
+state_dict['input_projection.weight'] = net.input_projection.weight.data.detach()
+state_dict['output_projection.weight'] = net.output_projection.weight.data.detach()
+state_dict['output_projection.bias'] = net.output_projection.bias.data.detach()
+net.load_state_dict(state_dict, strict=True)
 
 # %%
 """
 Now we're ready to train the model on the new dataset. We'll use the same training loop as before, but this time we'll train the entire model end-to-end.
 """
 # %%
-model = train_bci_decoder(
-    model=TransformerWithDecoder(
+batch_size = 64
+lr = 5e-2  # Learning rate
+epochs = 500  # Number of epochs to train
+
+net = net.to(device)
+model = TransformerWithDecoder(
         transformer=net,
-        behavior_dim=dataset['train_behavior'].shape[1],
+        behavior_dim=dataset['train_behavior'].shape[2],
         freeze_transformer=False,  # Unfreeze the transformer encoder
-    ),
+    ).to(device)
+model, val_r2 = finetune_bci_decoder(
+    model=model,
     dataset=dataset,
     batch_size=batch_size,
     lr=lr,
     epochs=epochs,
 )
+results.append(
+    {'method': 'fine-tune from mc_maze checkpoint (end-to-end)', 
+     'best_val_r2': val_r2
+})
 
 # %% [markdown]
 """
 And there we have it: a model, trained from scratch on a large dataset, that can be adapted to a smaller dataset with a few lines of code. This is the power of foundation models for neuroscience: they allow us to leverage large datasets and transfer learning to build powerful models that can be adapted to new tasks with minimal effort.
 
-Let's visualize all the scores of the different model variants we've tried on this dataset.
+Let's see all the scores of the different model variants we've tried on this dataset.
 """
 # %%
-# TODO: show the scores
-def plot_scores(scores):
-    """Plot scores for different model variants."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for label, score in scores.items():
-        ax.plot(score['epoch'], score['r2'], label=label)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('R² Score')
-    ax.legend()
-    plt.show()
+
+import pandas as pd
+pd.DataFrame(results).set_index('method').sort_values('best_val_r2', ascending=False)
 
 # %% [markdown]
 """
@@ -1244,24 +1284,161 @@ We just one more concept we'll need to cover: causal decoding. Thus far, we've u
 The fix is to use a causal transformer decoder. To prevent information from flowing from the future to the point, we'll use a mask that tells the model to only use the first token to reconstruct the first token; the first two tokens to reconstruct the second token; the first three tokens to reconstruct the third token, and so on. This is a causal decoder, and it allows us to use the model for online BCI decoding.
 
 This mask, which is a lower triangular matrix, can be created with the `torch.tril` function. We'll use this to create a causal transformer decoder that can be used for online BCI decoding.
+
+Confusingly, the mask should be set to False to signal that information is allowed to flow, and True to signal that information should be *masked out*. 
 """
 # %%
-mask = torch.tril(torch.ones((50, 50), dtype=torch.bool))
+mask = ~torch.tril(torch.ones(50, 50, dtype=torch.bool))
 plt.imshow(mask, cmap='gray', aspect='auto')
 plt.xlabel('Time (bins) – information flows from')
 plt.ylabel('Time (bins) - information flows to')
-plt.title("Example causal mask")
+plt.title("Example causal mask: black = allowed, white = masked out")
 
 # %% [markdown]
 """
+To leverage the causal mask, we simply need to pass it to the transformer layers in the forward pass, like so:
+
+```
+# Instance of a transformer encoder layer
+layer = nn.TransformerEncoderLayer(...)
+# Our mask, as above.
+mask = torch.tril(torch.ones((50, 50), dtype=torch.bool))
+# When we forward an input to our layer, we pass along the mask so information only flows between the desired tokens.
+layer(x, mask=mask)
+```
+
+We had already set up a parameter in the forward function in the `TransformerAutoencoder` implementation to make this easy. We can simply pass the mask to the `forward` method of the transformer, and it will take care of applying it to all transformer layers.
+
 Now let's implement the causal transformer decoder. We'll use the same architecture as before, but we'll add a causal mask to the transformer layers. This will ensure that the model only uses information from the past to predict the future.
 """
 # %%
+class CausalTransformerWithDecoder(TransformerWithDecoder):
+    """Combines pretrained PM Transformer with behavior decoder."""
+    
+    def __init__(
+        self,
+        transformer: nn.Module,
+        behavior_dim: int,
+        freeze_transformer: bool = True,
+    ):
+        super().__init__(transformer, behavior_dim, freeze_transformer)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: Input spikes (B, T, neurons)
+        Returns:
+            Tuple of (reconstructed spikes, decoded behavior)
+        """
+        # Generate a causal mask
+        mask = ~torch.tril(torch.ones((x.shape[1], x.shape[1]), dtype=torch.bool)).to(x.device)
+        # Get internal representations
+        _, h = self.transformer.forward(x=x, return_latents=True, mask=mask)
+            
+        # Decode behavior from representations
+        behavior = self.decoder(h)
+        
+        return behavior
+
+import argparse
+
+# Load the pretrained model
+net = TransformerAutoencoder(
+    input_dim=dataset['train_data'].shape[2],
+    hidden_dim=256,
+    num_layers=6,
+    num_heads=2,
+    ffn_dim=256,
+    dropout=0.1,
+    max_seq_len=70,
+)
+
+# Here's the tricky part: we'll overwrite the input and output projection layers to match the new number of neurons
+torch.serialization.add_safe_globals([argparse.Namespace])
+pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
+ckpt = torch.load(pretrained_model_path, map_location=device)
+state_dict = ckpt['model_state_dict']
+state_dict['input_projection.weight'] = net.input_projection.weight.data.detach()
+state_dict['output_projection.weight'] = net.output_projection.weight.data.detach()
+state_dict['output_projection.bias'] = net.output_projection.bias.data.detach()
+net.load_state_dict(state_dict, strict=True)
+
+batch_size = 64
+lr = 5e-2  # Learning rate
+epochs = 500  # Number of epochs to train
+
+net = net.to(device)
+causal_model = CausalTransformerWithDecoder(
+        transformer=net,
+        behavior_dim=dataset['train_behavior'].shape[2],
+        freeze_transformer=False,  # Unfreeze the transformer encoder
+    ).to(device)
+causal_model, val_r2 = finetune_bci_decoder(
+    model=causal_model,
+    dataset=dataset,
+    batch_size=batch_size,
+    lr=lr,
+    epochs=epochs,
+)
 
 # %%
 """
-Now we've successfully implemented a causal transformer decoder. This allows us to use the model for online BCI decoding, where we can only use spikes that have happened thus far to predict behavior.
+Now we've successfully implemented a causal transformer decoder. This allows us to use the model for online BCI decoding, where we can only use spikes that have happened thus far to predict behavior. Let's verify that the model behaves as expected. We'll do this by passing in a sequence of spikes and checking that the model only uses information from the past to predict the future.
+"""
+# %%
+sample_idx = 1
+spikes = torch.from_numpy(dataset['train_data'][sample_idx:sample_idx+1, :, :]).to(device).float()
+# Now create a perturbed version of spikes, where there's some noise in the second half of the trial..
+spikes_perturbed = spikes.clone()
+spikes_perturbed[:, spikes.shape[1] // 2:, :] += (torch.rand_like(spikes[:, spikes.shape[1] // 2:, :]) * 3).int().float()
 
+causal_model.eval()
+model.eval()
+
+behavior = torch.from_numpy(dataset['train_behavior'][sample_idx:sample_idx+1, :, :]).to(device).float()
+
+#predicted_behavior = model(spikes)
+predicted_behavior_causal = causal_model(spikes)
+predicted_behavior_acausal = model(spikes)
+predicted_behavior_causal_perturbed = causal_model(spikes_perturbed)
+predicted_behavior_acausal_perturbed = model(spikes_perturbed)
+
+# Draw the results
+rg = np.arange(spikes.shape[1]) * bin_size
+plt.figure(figsize=(6, 8))
+plt.subplot(5, 1, 1)
+plt.plot(rg, behavior[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.box(False)
+plt.title("True behavior")
+
+plt.subplot(5, 1, 2)
+plt.plot(rg, predicted_behavior_causal[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.box(False)
+plt.title("Causally decoded behavior (clean)")
+
+plt.subplot(5, 1, 3)
+plt.plot(rg, predicted_behavior_acausal[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.box(False)
+plt.title("Acausally decoded behavior (clean)")
+
+plt.subplot(5, 1, 4)
+plt.plot(rg, predicted_behavior_causal_perturbed[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.axvline(x=spikes.shape[1] // 2 * bin_size, color='r', linestyle='--', label='Perturbation point')
+plt.box(False)
+plt.title("Causally decoded behavior (perturbed)")
+
+plt.subplot(5, 1, 5)
+plt.plot(rg, predicted_behavior_acausal_perturbed[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.axvline(x=spikes.shape[1] // 2 * bin_size, color='r', linestyle='--', label='Perturbation point')
+plt.box(False)
+plt.title("Acausally decoded behavior (perturbed)")
+plt.xlabel('Time (s)')
+plt.ylabel('Velocity (m/s)')
+plt.tight_layout()
+
+
+# %%
+"""
 # Conclusion
 
 In this tutorial, we've covered the following topics:
@@ -1283,133 +1460,25 @@ So how can you take this to the next level? The literature is rife with ideas fo
 When you're ready to take that leap, check out the tutorial from Eva Dyer's group on [Foundation Models for Neuroscience](https://colab.research.google.com/github/evadyer/foundation_models_for_neuroscience/blob/main/01_foundation_models_for_neuroscience.ipynb). It covers many of these ideas in more detail, and provides a great starting point for your own research.
 Here are a few other relevant references:
 
+* https://cosyne-tutorial-2025.github.io/
 * 
 * 
-* 
 """
-# %%
+#%%[markdown]
 """
-* Check that we can recover the latents
-* Check what's in the weight matrices
+TODO:
 
-Now let's see how we can apply this kind of model to real data.
+* Rename the models in the table with the r2
+* Show how to use the causal decoder for online BCI decoding
+* Clean up the code, remove the r2 stuff
+* Make the code less repetitive
+* Hide code that is not relevant
+* Add in diagrams to demonstrate how the model works
+* Add in references to the relevant literature
+* Turn this into relevant exercises
+* Ask Claude several times how to make this better
+* Transform into a colab
+* Upload the preprocessed datasets to dandi
+* Clean up the repo, remove a lot of the boilerplate code
 
-* Use on `mc_maze_small` dataset
-* Now bring in `mc_maze` and show how we can adapt this model to other datasets
-"""
-
-# %% [markdown]
-"""
-1. Our goal is to find a good representation of this data. We’ll create a masked autoencoder. We’ll use transformers. Transformers work on tokens, so we need to decide on a tokenization scheme. NDT-1 makes a simple choice: one time bin, all neurons = one token. Note that there are many other tokenization schemes:
-    1. one token = multiple time bins, multiple neurons (patching)
-    2. one token = all time bins, one neuron
-    3. one token = one spike (the POYO choice)
-2. Next, we need a pretext task to encourage our model to learn a good representation of the data. Masked autoencoding is such a task. 
-    1. Split tokens into two: masked (25%) and unmasked (75%)
-    2. For the masked tokens, 80% will be replaced with zeros, 5% will be replaced by noise, the rest will be left alone
-    3. The unmasked tokens are untouched
-    4. The task: predict unmasked tokens from all (masked + unmasked tokens)
-    5. (demonstrate this in a cartoon fashion)
-3. With that, we have our core ingredients. Let’s build a simple transformer that takes in the raw data and predicts the left-out token
-    1. The latent dimensionality is the same as the dimensionality of the data
-    2. We add some positional encodings over time
-    3. We add an N-layer transformer (we use N=2)
-    4. At the end of the line, we have an output nonlinearity
-    5. We add a penalty for the log-likehood (Poisson loss)
-    6. We train the model (train within the colab)
-4. Let’s verify this finds some reasonable latents (look at the true latents and see whether they align with the inferred ones)
-5 (bonus). What do we know about the role of different position embeddings? Watch what happens if we remove the sinusoid embeddings
-6 (bonus). Consider a next-token prediction task instead
-
-
-To make sure we’re doing well, we’ll use another dataset where we know what the actual latents are. 
-
-
-## The datasets and the task
-
-Let’s visualize what we’re working with. A typical experiment where you might want to apply a foundation model for neuroscience is a BCI decoding experiment. In the `mc_maze` series of datasets (`mc_maze`, `mc_maze_large`, `mc_maze_medium`, `mc_maze_small`), a monkey completes a reaching task where he needs to trace with his finger on a touchscreen from a start position to an end position, avoiding the maze walls. Neurons are recorded in premotor cortex (PMd) and in M1. 
-
-I've created pickle files from the raw data, which is stored in the DANDI archive. The purpose of these pickle files is to make it easy for you to read this raw data and train a model from it. Let's see the different keys in the pickle file:
-
-```
-import pickle
-
-with open("mc_maze_data.pkl", "rb") as f:
-    data = pickle.load(f)
-
-pickle.keys()
-```
-
-These are the important keys:
-
-```
-* `train_data`: training data, an array of shape `(n_trials, n_timepoints, n_neurons)`. They correspond to the number of spikes (in 10 ms bins) for each trial, for each neuron
-* `train_behavior`: Aligned behavior, an array of shape `(n_trials, 2)`. This corresponds to the monkey's arm velocity, in `m/s`
-* `val_data` and `val_behavior`: same, but for a validation fold. We've pre-split the data into train and validation folds. We'll train on the train fold and validate our model on the validation fold.
-* `val_ground_truth`: "Ground truth" data for the true underlying spike rates. This was generated by taking an average over similar trials and applying a 50 ms smoothing window. 
-
-Let’s see some raster plots from one example trial. 
-
-[code]
-
-Notice that the data is quite noisy. There are many things we can do with this dataset, including:
-
-- Recovering the underlying spike rates of the data from spikes. Although data 
-- Predicting the monkey’s arm position. Perhaps we’d like to train a BCI. That would involve decoding the monkey’s hand position from just his brain activity. We could train based on the monkey’s real movement, and then apply the decoder so the monkey can simply imagine the movement instead.
-
-
-## Section 1: recovering the latents via a single-session autoencoder
-
-[show the image of NDT-1 here]
-
-1. Our goal is to find a good representation of this data. We’ll create a masked autoencoder. We’ll use transformers. Transformers work on tokens, so we need to decide on a tokenization scheme. NDT-1 makes a simple choice: one time bin, all neurons = one token. Note that there are many other tokenization schemes:
-    1. one token = multiple time bins, multiple neurons (patching)
-    2. one token = all time bins, one neuron
-    3. one token = one spike (the POYO choice)
-2. Next, we need a pretext task to encourage our model to learn a good representation of the data. Masked autoencoding is such a task. 
-    1. Split tokens into two: masked (25%) and unmasked (75%)
-    2. For the masked tokens, 80% will be replaced with zeros, 5% will be replaced by noise, the rest will be left alone
-    3. The unmasked tokens are untouched
-    4. The task: predict unmasked tokens from all (masked + unmasked tokens)
-    5. (demonstrate this in a cartoon fashion)
-3. With that, we have our core ingredients. Let’s build a simple transformer that takes in the raw data and predicts the left-out token
-    1. The latent dimensionality is the same as the dimensionality of the data
-    2. We add some positional encodings over time
-    3. We add an N-layer transformer (we use N=2)
-    4. At the end of the line, we have an output nonlinearity
-    5. We add a penalty for the log-likehood (Poisson loss)
-    6. We train the model (train within the colab)
-4. Let’s verify this finds some reasonable latents (look at the true latents and see whether they align with the inferred ones)
-5 (bonus). What do we know about the role of different position embeddings? Watch what happens if we remove the sinusoid embeddings
-6 (bonus). Consider a next-token prediction task instead
-
-## Section 2: an autoencoder that can switch different recordings
-
-Thus far, we’ve trained an auto-encoder from scratch. However, it is very specific to this recording session: what if we had recordings from two different monkeys doing the same task? Then we’d need to train two separate autoencoders. There is no natural link between the units for monkey 1 and for monkey 2.
-
-In this section, we’ll repeat the same exercise but *in latent space*. We use a scheme inspired by NDT-1-stitch, which is also similar to the one used by many others, including POYO: we use a linear projection to perform the analysis in latent space. The latent space does alignment.
-
-<show image of NDT-1 stitch>
-
-- Add the linear encoder and decoder layers
-- Apply on the Lorenz dataset–what do the embeddings look like? Look at the first two PCs of the embeddings and see what they look like
-- Apply on the mc-maze small dataset → can we read off the identity of the relevant areas?
-- Apply on mc-maze small and medium datasets → do the embeddings look similar? What would happen if swap in one embedding for the other?
-
-## Section 3: using the model
-
-So far, we’ve used a pretext task to learn a good representation of neural data. But how can we use this model to perform a downstream task? Let’s use one downstream task, decoding the hand velocity of a monkey during a task. This could be the basis for a brain-computer interface, where we replace the monkey’s real movement with an intended movement of a cursor.
-
-- Frozen model, linear decoder: let’s put a linear decoder on top of the model. We strip out the top of the model that transforms the latents into spike rates, and instead put a linear regression on top of it. There’s necessarily a lag between the monkey’s brain activity and the movement of the arm.
-    - Using a grid search on the latents of the model, let’s find the best lag. What is it? Let’s use this lag from now on.
-    - Let’s evaluate the model in a leave-one-out environment. How well does this work?
-- Frozen model, causal linear decoder. One issue here is that our model is acausal: although the linear decoder uses only past data, the transformer mixes tokens from the past *and* the future. That means we could not use the model as is as an online decoder. Let’s use attention masking to ensure that the model only uses past spike data. How well does that work?
-- Causal linear decoder, end-to-end training. It’s not clear that the pretrained model will work well, because the pretext task could leverage the past and future. Can we do better if we train the model end-to-end?
-- Did we actually do anything? Train a very simple causal lagged linear regression model end-to-end. How well does that work?
-
-## Section 4: scaling up
-
-We’ve trained our model on a tiny amount of data. We could scale up to vastly larger amounts of data with a significant amount of engineering. A big question in building foundation models for neuroscience is dealing with the nuts and bolts of data engineering: neural data can be in trials, continuous, readouts can be discrete, continuous, etc. And that means that to scale up to thousands of hours of data, we need to work on good data pipelines. See this tutorial from Eva Dyer’s group from Cosyne here:
-
-- https://cosyne-tutorial-2025.github.io/
 """
