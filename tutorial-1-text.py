@@ -1,10 +1,14 @@
 # %% [markdown]
 """
-# Tutorial – building an NDT-style autoencoder from scratch
+# Tutorial: Foundations of foundation models for neuroscience
 
-The goal of this notebook is to guide you through the *building blocks* of foundation models for neuroscience. Foundation models are trained on large-scale data in an unsupervised way, and can be adapted (fine-tuned, or steered using in-context learning) for use for a variety of downstream tasks. Training a foundation model typically involves the use of large-scale compute, but don’t let that scare you away! We can cover core building blocks, like transformers, tokenization, training and fine-tuning in a short tutorial. 
+The goal of this notebook is to guide you through the *building blocks* of foundation models for neuroscience. Foundation models are trained on large-scale data in an unsupervised way, and can be adapted (fine-tuned, or steered using in-context learning) for use for a variety of downstream tasks. Training a foundation model typically involves the use of large-scale compute, but don’t let that scare you away! We will cover core building blocks, like transformers, tokenization, training and fine-tuning in this tutorial. 
 
-We will train an NDT-1-stitch style model from scratch. NDT-1 (neural data transformer-1) is a model that is trained to predict missing spike data via a masked auto-encoder. It takes in spike data and recovers spike rates. The base NDT-1 is specific to a session: it’s not a foundation model. It’s conceptually similar to models like LFADS or GPFA that attempt to find latents from spike data.
+## Our objective: building up to NDT-1-stitch
+
+We will train an NDT-1-stitch style model from scratch. NDT-1 (neural data transformer-1, [Ye et al. 2021](https://arxiv.org/abs/2108.01210)) is a model that is trained to predict missing spike data via a masked auto-encoder. It takes in spike data and recovers spike rates. 
+
+The base NDT-1 is specific to a session: it’s not a foundation model. It’s conceptually similar to models like LFADS or GPFA that attempt to find latents from spike data.
 
 However, a simple extension (NDT-1-stitch) can stitch sessions from different subjects and experiments together. That allows it to be trained at large scale as a foundation model. While there are now many more effective foundation models for neuroscience that can be used for spike data (e.g. POYO), NDT-1-stitch covers most of the relevant ingredients to build a successful foundation model:
 
@@ -32,8 +36,22 @@ $$
 The Lorenz dataset has become something of a standard for debugging models that can infer latents from observations, since it was first used to benchmark the LFADS model. Let's look at some of the data:
 """
 # %%
+# All imports
+import argparse
+import pandas as pd
 import pickle
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm
+from typing import Tuple
 
+import torch
+from torch import nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import LambdaLR
+# %%
 def load_dataset(name):
     with open(f"data/{name}_data.pkl", "rb") as f:
         return pickle.load(f)
@@ -51,7 +69,6 @@ These are the important keys:
 Now let's look at the data for one trials:
 """
 # %%
-import matplotlib.pyplot as plt
 
 bin_size = 0.01 # in seconds
 
@@ -101,9 +118,6 @@ we take the spike data, and for each time bin, we create a token that contains t
 In this scheme, `n_tokens` = `n_timepoints`, and `latent_dim` = `n_neurons`. Let's write out the corresponding network.
 """
 # %%
-import math
-import torch
-from torch import nn
 
 class SimpleTransformerAutoencoder(nn.Module):
     def __init__(
@@ -182,7 +196,6 @@ Our next order of business is to define a pretext task that will encourage the m
 Let's see what the masking function looks like:
 """
 # %%
-from typing import Tuple
 
 def do_masking(batch: torch.Tensor, mask_ratio: float = 0.25) -> Tuple[torch.Tensor, torch.Tensor]:
     """Randomly mask *mask_ratio* timesteps per trial (span width = 1)."""
@@ -216,7 +229,6 @@ It's a little complicated, so let's break this down:
 With this done, let's see what happens when we apply this masking function to fake data.
 """
 # %%
-import numpy as np
 
 # Generate regular spike data from sinusoid
 torch.manual_seed(48)  # For reproducible results
@@ -292,10 +304,6 @@ Notice that we:
 Now that we've seen each piece individually, let's train the model!
 """
 # %%
-import math
-from torch.utils.data import DataLoader, TensorDataset
-from torch.optim.lr_scheduler import LambdaLR
-from tqdm import tqdm
 
 class WarmupCosineSchedule(LambdaLR):
     """ Linear warmup and then cosine decay.
@@ -315,6 +323,23 @@ class WarmupCosineSchedule(LambdaLR):
         # progress after warmup
         progress = float(step - self.warmup_steps) / float(max(1, self.t_total - self.warmup_steps))
         return max(0.0, 0.5 * (1. + math.cos(math.pi * float(self.cycles) * 2.0 * progress)))
+
+def calculate_pseudo_r2(A, B):
+    """Calculate the average pseudo R² between two tensors A and B.
+
+    A and B are two matrices of shape (n_samples, n_dimensions).
+    
+    By pseudo R² we mean the square of the correlation coefficient comparing A and B.
+
+    We use this rather than R^2 because it's insensitive to scaling.
+
+    Hence, r2 = 1 / n_dimensions sum_i corrcoef(A[:, i], B[:, i]) ^ 2
+    """
+    assert A.shape == B.shape, "A and B must have the same shape"
+    assert A.ndim == 2, "A and B must be 2D matrices"
+    corr_mat = torch.corrcoef(torch.concat([A, B], dim=1).T)
+    corrs = torch.diag(corr_mat[:corr_mat.shape[0] // 2, corr_mat.shape[0] // 2:])
+    return (corrs ** 2).mean().item()
 
 def train_one_epoch(
     net: nn.Module,
@@ -360,10 +385,8 @@ def evaluate(
             if has_ground_truth:
                 preds = net(spikes.float())
                 preds_rates = torch.exp(preds)  # Convert from log rates to rates
-            
-                corr_mat = torch.corrcoef(torch.concat([preds_rates.reshape(-1, spikes.shape[2]), ground_truth.to(device).reshape(-1, spikes.shape[2])], dim=1).T)
-                corrs = torch.diag(corr_mat[:corr_mat.shape[0] // 2, corr_mat.shape[0] // 2:])
-                r2 = (corrs ** 2).mean().item()
+
+                r2 = calculate_pseudo_r2(preds_rates.reshape(-1, spikes.shape[2]), ground_truth.to(device).reshape(-1, spikes.shape[2]))
                 r2s.append(r2)
             else:
                 r2s.append(0.0)
@@ -703,7 +726,6 @@ The data is similarly structured to the Lorenz dataset, with a few key differenc
 Let's start by visualizing this data.
 """
 # %%
-import matplotlib.pyplot as plt
 
 dataset = load_dataset("mc_maze_medium")
 
@@ -843,26 +865,6 @@ class TransformerWithDecoder(nn.Module):
 """
 Now we're ready to train this. We set up another training loop. Note that this time, our criterion will be the MSE loss, since we're predicting continuous behavior values. We also use far more conservative dropout rate.
 """
-# %%
-def compute_r2(pred: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
-    """Compute R² score."""
-    # Flatten batch and time dimensions
-    pred_flat = pred.reshape(-1, pred.shape[-1])
-    true_flat = true.reshape(-1, true.shape[-1])
-    
-    # Compute R² for each behavior dimension
-    r2_per_dim = []
-    for i in range(pred.shape[-1]):
-        # Compute correlation coefficient
-        if pred_flat[:, i].std() > 0 and true_flat[:, i].std() > 0:
-            corr = torch.corrcoef(
-                torch.stack([pred_flat[:, i], true_flat[:, i]])
-            )[0, 1]
-            r2_per_dim.append(corr ** 2)
-        else:
-            r2_per_dim.append(torch.tensor(0.0))
-    
-    return torch.stack(r2_per_dim).mean()
 
 def finetune_one_epoch(
     model: nn.Module,
@@ -887,7 +889,7 @@ def finetune_one_epoch(
         pred_behavior = model(spikes)
         
         # Compute loss
-        loss = criterion_mse(pred_behavior, behavior)
+        loss = criterion_mse(pred_behavior.reshape(-1, pred_behavior.shape[-1]), behavior.reshape(-1, behavior.shape[-1]))
         
         # Backward pass
         loss.backward()
@@ -896,8 +898,8 @@ def finetune_one_epoch(
         # Track metrics
         epoch_losses.append(loss.item())
         with torch.no_grad():
-            r2 = compute_r2(pred_behavior, behavior)
-            epoch_r2s.append(r2.item())
+            r2 = calculate_pseudo_r2(pred_behavior, behavior)
+            epoch_r2s.append(r2)
     
     return float(np.mean(epoch_losses)), float(np.mean(epoch_r2s))
 
@@ -1043,8 +1045,6 @@ Let's make up two baselines:
 Then we'll have a clear baseline to compare against.
 """
 # %%
-from torch import nn
-import torch.nn.functional as F
 
 def gaussian_smooth_1d(x, sigma=5):
     """
@@ -1203,7 +1203,6 @@ Although the `mc_maze` series of datasets were all collected in the animal with 
 Then we'll go ahead and train the model and see how well it performs on the new dataset.
 """
 # %%
-import argparse
 
 # Load the pretrained model
 net = TransformerAutoencoder(
@@ -1272,7 +1271,6 @@ Let's see all the scores of the different model variants we've tried on this dat
 """
 # %%
 
-import pandas as pd
 pd.DataFrame(results).set_index('method').sort_values('best_val_r2', ascending=False)
 
 # %% [markdown]
@@ -1339,8 +1337,6 @@ class CausalTransformerWithDecoder(TransformerWithDecoder):
         behavior = self.decoder(h)
         
         return behavior
-
-import argparse
 
 # Load the pretrained model
 net = TransformerAutoencoder(
@@ -1468,9 +1464,11 @@ Here are a few other relevant references:
 """
 TODO:
 
-* Rename the models in the table with the r2
-* Show how to use the causal decoder for online BCI decoding
-* Clean up the code, remove the r2 stuff
+* ~~Rename the models in the table with the r2~~
+* ~~Show how to use the causal decoder for online BCI decoding~~
+* Explain circshift collation
+* ~~remove the r2 stuff~~
+* ~~Move all of the import upwards~~
 * Make the code less repetitive
 * Hide code that is not relevant
 * Add in diagrams to demonstrate how the model works
@@ -1478,7 +1476,7 @@ TODO:
 * Turn this into relevant exercises
 * Ask Claude several times how to make this better
 * Transform into a colab
-* Upload the preprocessed datasets to dandi
+* Upload the preprocessed datasets somewhere
 * Clean up the repo, remove a lot of the boilerplate code
-
+* Clean up the code
 """
