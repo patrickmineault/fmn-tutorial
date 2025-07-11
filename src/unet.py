@@ -54,6 +54,7 @@ class UNet1D(nn.Module):
             )
 
     def forward(self, X):
+        X = X.permute(0, 2, 1)
         # Pad bidirectionally to the nearest (relevant) power of 2
         if self.nlayers > 0:
             X_shape = X.shape
@@ -88,6 +89,7 @@ class UNet1D(nn.Module):
         # Unpad!
         if right_pad > 0:
             X = X[:, :, left_pad:-right_pad]
+        X = X.permute(0, 2, 1)
         return X
 
     def set_baseline_rate(self, baseline_rate):
