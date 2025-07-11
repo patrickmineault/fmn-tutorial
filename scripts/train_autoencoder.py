@@ -20,29 +20,19 @@ Requirements
 from __future__ import annotations
 
 import argparse
-import h5py
-import math
 import numpy as np
-import os
-from pathlib import Path
-import pickle
-from typing import Tuple, Dict, Any
+from typing import Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import wandb
 import matplotlib.pyplot as plt
 import matplotlib
+
 matplotlib.use('Agg')  # Use non-interactive backend
 
-
-def load_dataset(name: str, data_root: str) -> Dict[str, np.ndarray]:
-    root = Path(data_root)
-    with open(root / f"{name}_data.pkl", "rb") as f:
-        return pickle.load(f)
     
 def do_masking(batch: torch.Tensor, mask_ratio: float = 0.25) -> Tuple[torch.Tensor, torch.Tensor]:
     """Randomly mask *mask_ratio* timesteps per trial (span width = 1)."""

@@ -1,3 +1,6 @@
+"""
+Preprocess data for training an autoencoder on spike data.
+"""
 import h5py
 from pathlib import Path
 from nlb_tools.nwb_interface import NWBDataset

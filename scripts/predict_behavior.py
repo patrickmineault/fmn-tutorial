@@ -33,13 +33,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ndt_reimplementation import instantiate_autoencoder
+from src.ndt_reimplementation import instantiate_autoencoder
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 # Import dataset loading functions and model from the training scripts
-from train_autoencoder import load_dataset
+from src.data import load_dataset
 
 
 class BehaviorDecoder(nn.Module):
