@@ -106,6 +106,7 @@ if IN_COLAB:
     !mv fmn-tutorial/checkpoints checkpoints
 else:
     !cp -r ../data data
+    !cp -r ../checkpoints checkpoints
     print("Running locally - skipping git clone")
 
 #%% {"cellView": "form"}
@@ -247,6 +248,8 @@ def calculate_pseudo_r2(A, B):
     corr_mat = torch.corrcoef(torch.concat([A, B], dim=1).T)
     corrs = torch.diag(corr_mat[: corr_mat.shape[0] // 2, corr_mat.shape[0] // 2 :])
     return (corrs**2).mean().item()
+
+bin_size = 0.01
 
 # %%
 def load_dataset(name):
@@ -414,7 +417,7 @@ def do_masking(
         (torch.rand_like(mask, dtype=float) < random_token_ratio) & mask & ~replace_zero
     )
 
-    batch_mean = batch.to(float).mean().item()
+    batch_mean = batch.float().mean().item()
     batch = batch.clone()  # avoid in‑place modification
     batch[replace_zero] = 0
     if replace_rand.any():
@@ -693,6 +696,7 @@ Let's visualize the results on some sample data. We'll take a single validation 
 # Which trial to visualize?
 def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates):
     """Visualize the model's predictions against the true rates."""
+    n_batch, nt, n_neurons = example_batch.shape
     plt.figure(figsize=(4, 12))
     plt.subplot(3, 1, 1)
     plt.imshow(
@@ -701,9 +705,9 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
         aspect="auto",
         extent=[
             0,
-            dataset["val_data"].shape[1] * bin_size,
+            nt * bin_size,
             0,
-            dataset["train_data"].shape[2],
+            n_neurons,
         ],
     )
     plt.title("Input spikes")
@@ -714,9 +718,9 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
         aspect="auto",
         extent=[
             0,
-            dataset["val_data"].shape[1] * bin_size,
+            nt * bin_size,
             0,
-            dataset["train_data"].shape[2],
+            n_neurons,
         ],
     )
     plt.title("Ground truth latents")
@@ -727,9 +731,9 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
         aspect="auto",
         extent=[
             0,
-            dataset["val_data"].shape[1] * bin_size,
+            nt * bin_size,
             0,
-            dataset["train_data"].shape[2],
+            n_neurons,
         ],
     )
     plt.title("Model prediction")
@@ -1175,7 +1179,7 @@ def finetune_one_epoch(
         # Track metrics
         epoch_losses.append(loss.item())
         with torch.no_grad():
-            r2 = calculate_pseudo_r2(pred_behavior, behavior)
+            r2 = calculate_pseudo_r2(pred_behavior.reshape((-1, pred_behavior.shape[2])), behavior.reshape((-1, pred_behavior.shape[2])))
             epoch_r2s.append(r2)
 
     return float(np.mean(epoch_losses)), float(np.mean(epoch_r2s))
@@ -1203,10 +1207,10 @@ def finetune_evaluate(
 
             # Compute metrics
             loss = criterion_mse(pred_behavior, behavior)
-            r2 = calculate_pseudo_r2(pred_behavior, behavior)
+            r2 = calculate_pseudo_r2(pred_behavior.reshape((-1, pred_behavior.shape[2])), behavior.reshape((-1, pred_behavior.shape[2])))
 
             losses.append(loss.item())
-            r2s.append(r2.item())
+            r2s.append(r2)
 
     return float(np.mean(losses)), float(np.mean(r2s))
 
@@ -1509,7 +1513,7 @@ net = TransformerAutoencoder(
 
 # Here's the tricky part: we'll overwrite the input and output projection layers to match the new number of neurons
 torch.serialization.add_safe_globals([argparse.Namespace])
-pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
+pretrained_model_path = "checkpoints/mc_maze_tuned.pt"  # Adjust this path
 ckpt = torch.load(pretrained_model_path, map_location=device)
 state_dict = ckpt["model_state_dict"]
 try:
@@ -1656,7 +1660,7 @@ net = TransformerAutoencoder(
 )
 
 torch.serialization.add_safe_globals([argparse.Namespace])
-pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
+pretrained_model_path = "checkpoints/mc_maze_tuned.pt"  # Adjust this path
 ckpt = torch.load(pretrained_model_path, map_location=device)
 state_dict = ckpt["model_state_dict"]
 state_dict["input_projection.weight"] = net.input_projection.weight.data.detach()
