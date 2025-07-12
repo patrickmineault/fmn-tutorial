@@ -2,15 +2,43 @@
 """
 # Tutorial: Foundations of foundation models for neuroscience
 
-The goal of this notebook is to guide you through the *building blocks* of foundation models for neuroscience. Foundation models are trained on large-scale data in an unsupervised way, and can be adapted (fine-tuned, or steered using in-context learning) for use for a variety of downstream tasks. Training a foundation model typically involves the use of large-scale compute, but don’t let that scare you away! We will cover core building blocks, like transformers, tokenization, training and fine-tuning in this tutorial. 
+The goal of this notebook is to guide you through the *building blocks* of foundation models for neuroscience. Foundation models are trained on large-scale data in an unsupervised way, and can be adapted (fine-tuned, or steered using in-context learning) for use for a variety of downstream tasks. Training a foundation model typically involves the use of large-scale compute, but don't let that scare you away! We will cover core building blocks, like transformers, tokenization, training and fine-tuning in this tutorial. 
 
 ## Our objective: building up to NDT-1-stitch
 
-We will train an NDT-1-stitch style model from scratch. NDT-1 (neural data transformer-1, [Ye et al. 2021](https://arxiv.org/abs/2108.01210)) is a model that is trained to predict missing spike data via a masked auto-encoder. It takes in spike data and recovers spike rates. 
+We will train an NDT-1-stitch style model from scratch. NDT-1 (neural data transformer-1, [Ye and Pandarinath 2021](https://arxiv.org/abs/2108.01210)) is a model that is trained to predict missing spike data via a masked auto-encoder. 
 
-The base NDT-1 is specific to a session: it’s not a foundation model. It’s conceptually similar to models like LFADS or GPFA that attempt to find latents from spike data.
+![NDT-1 architecture](images/ndt_model.png)
 
-However, a simple extension (NDT-1-stitch) can stitch sessions from different subjects and experiments together. That allows it to be trained at large scale as a foundation model. While there are now many more effective foundation models for neuroscience that can be used for spike data (e.g. POYO), NDT-1-stitch covers most of the relevant ingredients to build a successful foundation model:
+It takes in spike data and recovers spike rates. 
+
+![NDT-1 action](image/ndt_action.png)
+
+At the heart of NDT-1 is a transformer that reads in spike data, and outputs a denoised version of the spike data. 
+
+![NDT-1 transformer](images/ndt_transformer.png)
+
+NDT-1 is a self-supervised model that learns representations through a masked auto-encoder task. It's inspired by the masked auto-encoder (MAE) pre-training task that's used in BERT. Consider the following sentence:
+
+```
+The cat sat on the [MASK].
+                      |
+                    mat
+```
+
+A large-language model like BERT is trained, on millions of sentences, to predict masked words like `[MASK]` from the surrounding context. The model learns to predict the masked word, and in doing so, learns a representation of the sentence that captures the meaning of the words in context. NDT-1 uses an adaptation of the same masked autoencoding task, but with spike data. 
+
+## From NDT-1 to NDT-1-stitch
+
+The base NDT-1 works across a single session, with a fixed set of neurons. A number of extensions have been proposed that allows one to stitch together multiple sessions, and even multiple subjects, into a single model. This ultimately allows models to be trained on large-scale heterogeneous datasets, and is a key enabler of a foundation model for neuroscience. 
+
+Our implementation is inspired by NDT1-stitch, which has been shown to be effective at scaling beyond a single session ([Ye et al. 2023](https://www.biorxiv.org/content/10.1101/2023.09.18.558113v1), [Zhang et al. 2024](https://arxiv.org/abs/2407.14668))
+
+While there are now many newer, and more effective foundation models for neuroscience that can be used for spike data (e.g. POYO, POSSM, etc.), NDT-1-stitch covers most of the relevant ingredients to build a successful foundation model.
+
+## Learning objectives
+
+We'll cover the following topics in this tutorial:
 
 * Building transformers that can read and embed spike data
 * Creating a self-supervised pretraining task that learns good representations of neural data
@@ -19,11 +47,15 @@ However, a simple extension (NDT-1-stitch) can stitch sessions from different su
 * Building embedding and readout mechanisms that can be used to adapt to different sessions and brains
 * Fine-tuning a model trained on one task to another task
 
-Let’s train an NDT-1-stitch style model from scratch. 
+By the end of this tutorial, you will have a good understanding of the core building blocks of foundation models for neuroscience, and how to implement them in PyTorch. You'll be in great shape to read the literature and identify how models are built and evaluated. 
+
+What we won't cover in this tutorial is *how* to scale up to massive compute, or how to train models on large-scale datasets. We have references at the end that cover these topics.
+
+With that out of the way, let's train an NDT-1-stitch style model from scratch!
 
 ## A toy task: the Lorenz dataset
 
-We’ll start by applying our model to artificially generated data. Because the data is artificially generated, we know exactly what the latents are, and it will be easy to validate that our model is working correctly. The Lorenz dataset is a toy, artificial dataset generated by the latents of the Lorenz attractor. The [Lorenz attractor](https://en.wikipedia.org/wiki/Lorenz_system) is a 3-variable chaotic system that unfolds over time. The Lorenz dataset is generated by taking projections of these variables, scaling them to obtain spike rates, and generating spikes via a Poisson process. In other words:
+We'll start by applying our model to artificially generated data. Because the data is artificially generated, we know exactly what the latents are, and it will be easy to validate that our model is working correctly. The Lorenz dataset is a toy, artificial dataset generated by the latents of the Lorenz attractor. The [Lorenz attractor](https://en.wikipedia.org/wiki/Lorenz_system) is a 3-variable chaotic system that unfolds over time. The Lorenz *dataset* is generated by taking projections of these variables, scaling them to obtain spike rates, and generating spikes via a Poisson process. In other words:
 
 $$
 \begin{align}
@@ -33,24 +65,189 @@ $$
 \end{align}
 $$
 
-The Lorenz dataset has become something of a standard for debugging models that can infer latents from observations, since it was first used to benchmark the LFADS model. Let's look at some of the data:
+The Lorenz dataset has become something of a standard for debugging models that can infer latents from observations, as it was used to benchmark the LFADS model. Let's have a look at the data to understand what we're working with:
 """
-# %%
-# All imports
+# %% {"cellView": "form"}
+#@title Import necessary libraries
 import argparse
-import pandas as pd
-import pickle
 import math
-import matplotlib.pyplot as plt
-import numpy as np
-from tqdm import tqdm
+import pickle
 from typing import Tuple
 
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
-from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+
+%config InlineBackend.figure_format = 'retina'
+
+if not torch.cuda.is_available():
+    print("Warning: No GPU available. Training will be slow.")
+    print("If you are running this in Google Colab, make sure to enable GPU acceleration in the Runtime settings.")
+    print("Go to Runtime > Change runtime type > Hardware accelerator > GPU.")
+
+#%% {"cellView": "form"}
+#@title Load data and tools
+try:
+    import google.colab
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+if IN_COLAB:
+    !git clone https://github.com/patrickmineault/fmn-tutorial.git
+    !pip install -q -r -e fmn-tutorial/
+    !mv fmn-tutorial/data data
+    !mv fmn-tutorial/checkpoints checkpoints
+else:
+    !cp -r ../data data
+    print("Running locally - skipping git clone")
+
+#%% {"cellView": "form"}
+#@title Visualization functions
+def plot_trial_data(trial_data, trial_truth, bin_size=0.01):
+    """
+    Helper function to plot the trial data and truth."""
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=1,  # two rows, one column
+        figsize=(4, 6),  # any size you like
+        sharex=False,  # optional: share the x-axis
+    )
+
+    axes[0].imshow(
+        trial_data.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            trial_data.shape[0] * bin_size,
+            0,
+            trial_data.shape[1],
+        ],
+    )
+    axes[0].set_ylabel("Neuron #")
+    axes[0].set_title("Spikes")
+
+    axes[1].imshow(
+        dataset["val_truth"][0, :, :].T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            trial_truth.shape[0] * bin_size,
+            0,
+            trial_truth.shape[1],
+        ],
+    )
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_ylabel("Neuron #")
+    axes[1].set_title("Spike rates")
+
+    plt.tight_layout()
+
+def visualize_masking(data, masked_data, mask):
+    """Visualize the masking function."""
+    
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6))
+
+    # Create 4-panel visualization
+    fig, axes = plt.subplots(3, 1, figsize=(8, 8))
+
+    # Since we have a single sequence, we'll plot as line plots for clarity
+    time_axis = np.arange(original_data.shape[1])
+
+    axes[0].imshow(
+        original_data.squeeze().numpy().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            data.shape[1] * bin_size,
+            0,
+            data.shape[2],
+        ],
+    )
+    axes[0].set_title("Original Data (Non-masked)", fontsize=14, fontweight="bold")
+    axes[0].set_xlabel("Time Steps")
+    axes[0].set_ylabel("Spike Value")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].imshow(torch.tile(mask, [n_neurons, 1]).squeeze(), cmap="gray")
+    axes[1].set_title("Mask (white = masked positions)", fontsize=14, fontweight="bold")
+    axes[1].set_xlabel("Time Steps")
+    axes[1].set_ylabel("Mask Value")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].imshow(
+        masked_data.squeeze().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            data.shape[1] * bin_size,
+            0,
+            data.shape[2],
+        ],
+    )
+    axes[2].set_title("Masked Data", fontsize=14, fontweight="bold")
+    axes[2].set_xlabel("Time Steps")
+    axes[2].set_ylabel("Spike Value")
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+#%% {"cellView": "form"}
+#@title Utility functions
+class WarmupCosineSchedule(LambdaLR):
+    """Linear warmup and then cosine decay.
+    Linearly increases learning rate from 0 to 1 over `warmup_steps` training steps.
+    Decreases learning rate from 1. to 0. over remaining `t_total - warmup_steps` steps following a cosine curve.
+    If `cycles` (default=0.5) is different from default, learning rate follows cosine function after warmup.
+    """
+
+    def __init__(self, optimizer, warmup_steps, t_total, cycles=0.5, last_epoch=-1):
+        self.warmup_steps = warmup_steps
+        self.t_total = t_total
+        self.cycles = cycles
+        super(WarmupCosineSchedule, self).__init__(
+            optimizer, self.lr_lambda, last_epoch=last_epoch
+        )
+
+    def lr_lambda(self, step):
+        if step < self.warmup_steps:
+            return float(step) / float(max(1.0, self.warmup_steps))
+        # progress after warmup
+        progress = float(step - self.warmup_steps) / float(
+            max(1, self.t_total - self.warmup_steps)
+        )
+        return max(
+            0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.cycles) * 2.0 * progress))
+        )
+
+def calculate_pseudo_r2(A, B):
+    """Calculate the average pseudo R² between two tensors A and B.
+
+    A and B are two matrices of shape (n_samples, n_dimensions).
+
+    By pseudo R² we mean the square of the correlation coefficient comparing A and B.
+
+    We use this rather than R^2 because it's insensitive to scaling.
+
+    Hence, r2 = 1 / n_dimensions sum_i corrcoef(A[:, i], B[:, i]) ^ 2
+    """
+    assert A.shape == B.shape, "A and B must have the same shape"
+    assert A.ndim == 2, "A and B must be 2D matrices"
+    corr_mat = torch.corrcoef(torch.concat([A, B], dim=1).T)
+    corrs = torch.diag(corr_mat[: corr_mat.shape[0] // 2, corr_mat.shape[0] // 2 :])
+    return (corrs**2).mean().item()
+
 # %%
 def load_dataset(name):
     with open(f"data/{name}_data.pkl", "rb") as f:
@@ -66,59 +263,46 @@ These are the important keys:
 * `val_data` and `val_behavior`: same, but for a validation fold. We've pre-split the data into train and validation folds. We'll train on the train fold and validate our model on the validation fold.
 * `val_truth`: ground truth data for the true underlying spike rates. We know the ground truth because this is an artificial dataset.
 
-Now let's look at the data for one trials:
+Now let's look at the data for a single trial:
 """
 # %%
+plot_trial_data(dataset["val_data"][0], dataset["val_truth"][0], bin_size = 0.01)
 
-bin_size = 0.01 # in seconds
-
-# One figure, two axes stacked vertically
-fig, axes = plt.subplots(
-    nrows=2, ncols=1,           # two rows, one column
-    figsize=(6, 8),             # any size you like
-    sharex=False                 # optional: share the x-axis
-)
-
-axes[0].imshow(dataset['val_data'][0, :, :].T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-axes[0].set_ylabel('Neuron #')
-axes[0].set_title('Spikes')
-
-axes[1].imshow(dataset['val_truth'][0, :, :].T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-axes[1].set_xlabel('Time (s)')
-axes[1].set_ylabel('Neuron #')
-axes[1].set_title('Spike rates')
-
-plt.tight_layout()
 # %% [markdown]
 """
-Our job will be to learn a model that can take spike data, like the one on the left, and give us back rate data, like the one on the right.
+Our job will be to learn a model that can take spike data, like the one at the top, and give us back rate data, like what we have at the bottom. Importantly, we can't train the model to derive the spike rate data directly, because in general we won't have access to that ground truth! We need to be a bit more clever, using this to build an auto-encoder.
 """
 # %% [markdown]
 """
 # Building a transformer auto-encoder
 
-Our first order of business is to create a model that can take in spike data and return (denoised) spike data: an auto-encoder.
-This is going to be the scheme for our auto-encoder:
+Our first order of business is to create a model that can take in spike data and return (denoised) spike data: an auto-encoder. This is going to be the scheme for our auto-encoder:
 
-* We take one trial worth of spike data (`n_timepoints`, `n_neurons`) and embed into a series of tokens (`n_tokens`, `latent_dim`)
-* We pass these tokens through a series of transformer layers. These transformer layers can peak into data from any timepoint and any neuron, and return a new set of tokens (n_tokens, latent_dim)
+* We take one trial worth of spike data (`n_timepoints`, `n_neurons`) and embed into a series of tokens (`n_tokens`, `latent_dim`).
+* We pass these tokens through a series of transformer layers. These transformer layers mix information across timepoints neurons, and return a new set of tokens (n_tokens, latent_dim)
 * At the end, we then decode back into spike data (`n_timepoints`, `n_neurons`)
 
-We'll have done well if our autoencoder gives us back a denoised version of the input spike data.
+## What's a transformer?
 
-We've covered transformers in a previous tutorial, so we won't go into too much detail here. The key idea is that transformers 
-are a type of neural network that can process sequences of data, and they do so by using self-attention mechanisms to weigh 
-the importance of different parts of the input sequence. Multiple transformer layers form a powerful means of processing data.
+We assume that you've encountered transformers before, but if you haven't, here's a quick refresher. Transformers are a type of neural network architecture that was introduced in the paper [Attention is All You Need](https://arxiv.org/abs/1706.03762). They are designed to process sequences of data, and they do so by using self-attention mechanisms to weigh the importance of different parts of the input sequence.
+
+We will not get into the math of transformers here (you should have encountered them in earlier tutorials), but we will use them to process our spike data. The key idea is that transformers can learn to represent sequences of data in a way that captures the relationships between different parts of the sequence. This is done by using self-attention mechanisms that allow the model to focus on different parts of the input sequence when making predictions.
+
+## What's a token?
+
+A token in the context of transformers is the fundamental unit of information that the model processes. It as a discrete, fixed-size representation that captures some meaningful aspect of your input data: a vector. 
+
+When working with text, words or subwords are often used as tokens. When working with images, patches of pixels can be used as tokens. And so on and so forth.
 
 The big question is: how do we turn spike data into tokens?
 
-We'll start with the simplest possible scheme: one token corresponds to all the spike data from a single time bin. That means 
-we take the spike data, and for each time bin, we create a token that contains the spike counts for all neurons at that time bin.
+We'll start with the simplest possible scheme: one token corresponds to all the spike data from a single time bin. That means we take the spike data, and for each time bin, we create a token that contains the spike counts for all neurons at that time bin.
 
-In this scheme, `n_tokens` = `n_timepoints`, and `latent_dim` = `n_neurons`. Let's write out the corresponding network.
+In this scheme, `n_tokens` = `n_timepoints`, and `latent_dim` = `n_neurons`. 
+
+Let's write out the corresponding network.
 """
 # %%
-
 class SimpleTransformerAutoencoder(nn.Module):
     def __init__(
         self,
@@ -132,9 +316,7 @@ class SimpleTransformerAutoencoder(nn.Module):
         super().__init__()
         self.input_dim = input_dim
 
-        self.pos_embedding = nn.Embedding(max_seq_len, input_dim)
-        self.register_buffer("pos_embedding_rg", torch.arange(max_seq_len))
-        self.get_positional_encoding = lambda seq_len: self.pos_embedding(self.pos_embedding_rg[:seq_len])
+        self.pos_embedding = nn.Parameter(torch.zeros(max_seq_len, input_dim))
 
         # Transformer encoder layers
         def create_encoder_layer() -> nn.TransformerEncoderLayer:
@@ -147,9 +329,11 @@ class SimpleTransformerAutoencoder(nn.Module):
                 norm_first=True,
             )
 
-        self.encoder_layers = nn.ModuleList([create_encoder_layer() for _ in range(num_layers)])
+        self.encoder_layers = nn.ModuleList(
+            [create_encoder_layer() for _ in range(num_layers)]
+        )
         self.norm = nn.LayerNorm(input_dim)
-        
+
         # This projects the output back to the input dimension
         self.output_projection = nn.Linear(input_dim, input_dim)
         self.dropout = nn.Dropout(dropout)
@@ -157,27 +341,27 @@ class SimpleTransformerAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the transformer autoencoder.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
-            
+
         Returns:
             Reconstructed tensor of shape (batch_size, seq_len, input_dim)
         """
         batch_size, seq_len, feature_dim = x.shape
 
         # Project input and add positional encoding
-        x = math.sqrt(self.input_dim) * x + self.get_positional_encoding(seq_len).unsqueeze(0)
+        x = math.sqrt(self.input_dim) * x + self.pos_embedding[:seq_len, :].unsqueeze(0)
         x = self.dropout(x)
-        
+
         # Pass through transformer encoder layers
         for layer in self.encoder_layers:
             x = layer(x)
 
         x = self.dropout(self.norm(x))  # Final layer normalization
-        # Project back to input dimension
         x = self.output_projection(x)
         return x
+
 
 n_neurons = 29  # Number of neurons in the Lorenz dataset
 net = SimpleTransformerAutoencoder(n_neurons)
@@ -185,29 +369,50 @@ net
 
 # %% [markdown]
 """
+## Understanding the positional encoding
+
 Aside from the all-important transformer encoder layers, this model has a positional encoding layer that adds positional information to the input tokens. This is important because transformers do not have any inherent notion of order, and we need to provide that information explicitly.
 
-The way we do this is by adding a positional encoding to each token. The positional encoding is a learned embedding that encodes the position of each token in the sequence. This allows the transformer to take into account the order of the tokens when processing them.
+The positional encoding is initialized in the __init__ constructor:
 
-Another important point is that we use dropout at multiple points in the network. This is a form of regularization that helps prevent overfitting. Dropout randomly sets some of the activations to zero during training, which forces the model to learn more robust features. The NDT-1 paper notes that aggressive dropout is important to make the network work well.
+```
+self.pos_embedding = nn.Parameter(torch.zeros(max_seq_len, input_dim))
+```
+
+It's directly added to the input tokens in the forward pass:
+
+```
+x = math.sqrt(self.input_dim) * x + self.pos_embedding[:seq_len, :].unsqueeze(0)
+```
+
+First, we scale the input; then, we add the positional encoding. We use unsqueeze(0) to add a batch dimension, since all trials in the batch share the same positional embedding.
+
+## Dropout
+
+Another important point is that we use dropout at multiple points in the network. This is a form of regularization that helps prevent overfitting. Dropout randomly sets some of the activations to zero during training, which forces the model to learn more robust features. The NDT-1 paper notes that aggressive dropout is **critical** to make the network learn meaningful features.
+
+## Defining the pretext task
 
 Our next order of business is to define a pretext task that will encourage the model to learn a good representation of the data. The pretext task we will use is a masked autoencoder. The idea is to randomly mask out some of the tokens in the input sequence, and then train the model to predict the masked tokens from the unmasked ones.
 
 Let's see what the masking function looks like:
 """
 # %%
-
-def do_masking(batch: torch.Tensor, mask_ratio: float = 0.25) -> Tuple[torch.Tensor, torch.Tensor]:
+def do_masking(
+    batch: torch.Tensor, mask_ratio: float = 0.25
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Randomly mask *mask_ratio* timesteps per trial (span width = 1)."""
     batch_size, num_timesteps = batch.shape[:2]
     mask = torch.rand(batch_size, num_timesteps) < mask_ratio
-            
+
     # Replace some masked tokens with 0 (80%) or random spikes (20%)
     mask_token_ratio = 0.8
     random_token_ratio = 0.25
 
     replace_zero = (torch.rand_like(mask, dtype=float) < mask_token_ratio) & mask
-    replace_rand = (torch.rand_like(mask, dtype=float) < random_token_ratio) & mask & ~replace_zero
+    replace_rand = (
+        (torch.rand_like(mask, dtype=float) < random_token_ratio) & mask & ~replace_zero
+    )
 
     batch_mean = batch.to(float).mean().item()
     batch = batch.clone()  # avoid in‑place modification
@@ -217,59 +422,98 @@ def do_masking(batch: torch.Tensor, mask_ratio: float = 0.25) -> Tuple[torch.Ten
         batch[replace_rand] = rand_values[replace_rand]
 
     return batch, mask
+
 # %% [markdown]
 """
 It's a little complicated, so let's break this down:
 
 * The masking function takes in a batch of spike data and a mask ratio (default 0.25).
 * It randomly masks out some of the tokens in the batch, with a span width of 1 (i.e., each token is masked independently).
-* For the masked tokens, 80% are replaced with zeros, and 20% are those that are not replaced are replaced with random spikes.
+* For each masked token:
+    * with 80% probability, it's replaced with zeros
+    * if it's not replaced by zeros, then with 25% probability, it is replaced with random spikes (that is, 25% of 20% are replaced with random spikes, or 5% of the total masked tokens).
+    * the remaining 15% of the masked tokens are left unchanged.
 * The unmasked tokens are untouched.
 
-With this done, let's see what happens when we apply this masking function to fake data.
+This complex recipe mirrors the one used in the original BERT paper, and is designed to encourage the model to learn a good representation of the data by predicting the masked tokens from the unmasked ones. The three different replacement strategies (zero, random, and unchanged) encourage the model to learn different aspects of the data:
+
+- The zero replacement encourages the model to learn to predict the missing tokens from the context.
+- The random replacement encourages the model to learn to ignore noise in the data.
+- The unchanged tokens encourage the model to learn to predict the unmasked tokens from the context.
+
+Let's see what happens when we apply this masking function to fake data.
 """
 # %%
-
-# Generate regular spike data from sinusoid
 torch.manual_seed(48)  # For reproducible results
-original_data = torch.tensor(dataset['train_data'][0:1, :, :])  # Use the first trial from the training data
+original_data = torch.tensor(
+    dataset["train_data"][0:1, :, :]
+)  # Use the first trial from the training data
 
-# Apply masking
-masked_data, mask = do_masking(original_data, mask_ratio=0.25)
+masked_data, mask = do_masking(original_data, 0.25)
+visualize_masking(original_data, masked_data, mask)
 
-# Create 4-panel visualization
-fig, axes = plt.subplots(3, 1, figsize=(8, 8))
-
-# Since we have a single sequence, we'll plot as line plots for clarity
-time_axis = np.arange(original_data.shape[1])
-
-axes[0].imshow(original_data.squeeze().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-axes[0].set_title('Original Data (Non-masked)', fontsize=14, fontweight='bold')
-axes[0].set_xlabel('Time Steps')
-axes[0].set_ylabel('Spike Value')
-axes[0].grid(True, alpha=0.3)
-
-axes[1].imshow(torch.tile(mask, [n_neurons, 1]).squeeze(), cmap='gray')
-axes[1].set_title('Mask (white = masked positions)', fontsize=14, fontweight='bold')
-axes[1].set_xlabel('Time Steps')
-axes[1].set_ylabel('Mask Value')
-axes[1].grid(True, alpha=0.3)
-
-axes[2].imshow(masked_data.squeeze().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-axes[2].set_title('Masked Data', fontsize=14, fontweight='bold')
-axes[2].set_xlabel('Time Steps')
-axes[2].set_ylabel('Spike Value')
-axes[2].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
 # %% [markdown]
 """
 Notice, in particular, how the masked data has many more zeros at early time steps. The challenge is then to reconstruct the original data from the masked data.
 
+## The loss function
+
+Once we have the masked data, we need to define a loss function that will encourage the model to learn to predict the masked tokens. The loss function we will use is the Poisson negative log-likelihood loss, which is appropriate for spike data. This loss function measures how well the model predicts the spike counts in the masked tokens, given the unmasked tokens.
+"""
+# %%
+criterion = nn.PoissonNLLLoss(reduction="none", log_input=True)
+# For one example batch, let's see how this works:
+# Use the first trial from the training data
+spikes = torch.tensor(dataset["train_data"][0:16, :, :]).to(torch.int)
+mask_ratio = 0.25  # Masking ratio for the pretext task
+spikes_masked, mask = do_masking(spikes, mask_ratio)
+preds = net(spikes_masked.float())
+loss = criterion(preds[mask], spikes[mask]).mean()
+
+# %% [markdown]
+"""
+Notice that:
+
+* We only use the masked tokens to compute the loss
+* We use the Poisson negative log-likelihood loss, which is appropriate for spike data
+
+## Augmentation
+
+It's coming to augment data in deep learning pipelines: for example, we might include random shifts and zooms in images to make the model more robust to small perturbations. In the case of spike data, we can use a similar idea: we can randomly shift the time series data by a small amount, and then train the model to predict the shifted data. We'll do the shifting in the collate function, which is called when we create batches of data. This will allow us to shift the data randomly for each batch, and make the model more robust to small shifts in the data.
+"""
+# %% 
+def circshift_collate_fn(batch, delta=1):
+    def fun(batch):
+        """Vectorized version for better performance"""
+        data_list, truth_list = zip(*batch)
+
+        data = torch.stack(data_list)
+        truth = torch.stack(truth_list)
+
+        batch_size = data.size(0)
+        seq_len = data.size(1)
+
+        # Generate random shifts for each sample
+        shifts = torch.randint(-delta, delta + 1, (batch_size,))
+
+        # Apply shifts using advanced indexing
+        indices = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+        shifted_indices = (indices - shifts.unsqueeze(1)) % seq_len
+
+        # Apply the shifts
+        data = data.gather(
+            1, shifted_indices.unsqueeze(-1).expand(-1, -1, data.size(-1))
+        )
+        return data, truth
+
+    return fun
+# %% [markdown]
+"""
+## Putting it all together and training the model
+
 With that, we're ready to learn a model that can take in the masked data and predict the unmasked tokens. We're going to create our basic training loop, which should look familiar by now:
 
-* Load the data
+* Load the data (including the circshift augmentation)
 * Create the model
 * Create the loss function
 * Create the optimizer
@@ -282,65 +526,9 @@ With that, we're ready to learn a model that can take in the masked data and pre
     * Every few iterations:
         * Calculate the validation loss
 
-Most of this is straightforward: the most critical piece we haven't seen is how we compute the loss. It goes like this:
+Let's put it all together!
 """
 # %%
-criterion = nn.PoissonNLLLoss(reduction="none", log_input=True)
-# For one example batch, let's see how this works:
-# Use the first trial from the training data
-spikes = torch.tensor(dataset['train_data'][0:16, :, :]).to(torch.int)
-mask_ratio = 0.25  # Masking ratio for the pretext task
-spikes_masked, mask = do_masking(spikes, mask_ratio)
-preds = net(spikes_masked.float())
-loss = criterion(preds[mask], spikes[mask]).mean()
-
-# %% [markdown]
-"""
-Notice that we:
-
-* Only use the masked tokens to compute the loss
-* Use the Poisson negative log-likelihood loss, which is appropriate for spike data
-
-Now that we've seen each piece individually, let's train the model!
-"""
-# %%
-
-class WarmupCosineSchedule(LambdaLR):
-    """ Linear warmup and then cosine decay.
-        Linearly increases learning rate from 0 to 1 over `warmup_steps` training steps.
-        Decreases learning rate from 1. to 0. over remaining `t_total - warmup_steps` steps following a cosine curve.
-        If `cycles` (default=0.5) is different from default, learning rate follows cosine function after warmup.
-    """
-    def __init__(self, optimizer, warmup_steps, t_total, cycles=.5, last_epoch=-1):
-        self.warmup_steps = warmup_steps
-        self.t_total = t_total
-        self.cycles = cycles
-        super(WarmupCosineSchedule, self).__init__(optimizer, self.lr_lambda, last_epoch=last_epoch)
-
-    def lr_lambda(self, step):
-        if step < self.warmup_steps:
-            return float(step) / float(max(1.0, self.warmup_steps))
-        # progress after warmup
-        progress = float(step - self.warmup_steps) / float(max(1, self.t_total - self.warmup_steps))
-        return max(0.0, 0.5 * (1. + math.cos(math.pi * float(self.cycles) * 2.0 * progress)))
-
-def calculate_pseudo_r2(A, B):
-    """Calculate the average pseudo R² between two tensors A and B.
-
-    A and B are two matrices of shape (n_samples, n_dimensions).
-    
-    By pseudo R² we mean the square of the correlation coefficient comparing A and B.
-
-    We use this rather than R^2 because it's insensitive to scaling.
-
-    Hence, r2 = 1 / n_dimensions sum_i corrcoef(A[:, i], B[:, i]) ^ 2
-    """
-    assert A.shape == B.shape, "A and B must have the same shape"
-    assert A.ndim == 2, "A and B must be 2D matrices"
-    corr_mat = torch.corrcoef(torch.concat([A, B], dim=1).T)
-    corrs = torch.diag(corr_mat[:corr_mat.shape[0] // 2, corr_mat.shape[0] // 2:])
-    return (corrs ** 2).mean().item()
-
 def train_one_epoch(
     net: nn.Module,
     loader: DataLoader,
@@ -352,8 +540,8 @@ def train_one_epoch(
     net.train()
     epoch_losses = []
     for spikes, _ in loader:  # dataset returns a single tensor
-        spikes = spikes.to(device)
         optimizer.zero_grad()
+        spikes = spikes.to(device)
         spikes_masked, mask = do_masking(spikes, mask_ratio)
         preds = net(spikes_masked.float())
         loss = criterion(preds[mask], spikes[mask]).mean()
@@ -362,13 +550,14 @@ def train_one_epoch(
         epoch_losses.append(loss.item())
     return float(np.mean(epoch_losses))
 
+
 def evaluate(
     net: nn.Module,
     loader: DataLoader,
     device: torch.device,
     criterion: nn.Module,
     mask_ratio: float = 0.0,
-    has_ground_truth: bool = False
+    has_ground_truth: bool = False,
 ) -> Tuple[float, float]:
     net.eval()
     losses, r2s = [], []
@@ -376,7 +565,11 @@ def evaluate(
         for spikes, ground_truth in loader:
             # Measure performance on the pretext task
             spikes = spikes.to(device)
-            masked_spikes, mask = do_masking(spikes, mask_ratio) if mask_ratio > 0 else (spikes, torch.ones_like(spikes, dtype=torch.bool))
+            masked_spikes, mask = (
+                do_masking(spikes, mask_ratio)
+                if mask_ratio > 0
+                else (spikes, torch.ones_like(spikes, dtype=torch.bool))
+            )
             preds = net(masked_spikes.float())
             loss = criterion(preds[mask], spikes[mask]).mean()
             losses.append(loss.item())
@@ -386,36 +579,16 @@ def evaluate(
                 preds = net(spikes.float())
                 preds_rates = torch.exp(preds)  # Convert from log rates to rates
 
-                r2 = calculate_pseudo_r2(preds_rates.reshape(-1, spikes.shape[2]), ground_truth.to(device).reshape(-1, spikes.shape[2]))
+                r2 = calculate_pseudo_r2(
+                    preds_rates.reshape(-1, spikes.shape[2]),
+                    ground_truth.to(device).reshape(-1, spikes.shape[2]),
+                )
                 r2s.append(r2)
             else:
                 r2s.append(0.0)
 
     return float(np.mean(losses)), float(np.mean(r2s))
 
-def circshift_collate_fn(batch, delta=1):
-    def fun(batch):
-        """Vectorized version for better performance"""
-        data_list, truth_list = zip(*batch)
-        
-        data = torch.stack(data_list)
-        truth = torch.stack(truth_list)
-        
-        batch_size = data.size(0)
-        seq_len = data.size(1)
-        
-        # Generate random shifts for each sample
-        shifts = torch.randint(-delta, delta + 1, (batch_size,))
-        
-        # Apply shifts using advanced indexing
-        indices = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
-        shifted_indices = (indices - shifts.unsqueeze(1)) % seq_len
-        
-        # Apply the shifts
-        data = data.gather(1, shifted_indices.unsqueeze(-1).expand(-1, -1, data.size(-1)))
-        return data, truth
-
-    return fun
 
 def train_network(net, data, batch_size, lr, epochs, mask_ratio):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -427,15 +600,25 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
     try:
         val_truth = torch.from_numpy(data["val_truth"])
         has_ground_truth = True
-        print(f"Found ground truth for val data (different from input: {has_ground_truth})")
+        print(
+            f"Found ground truth for val data (different from input: {has_ground_truth})"
+        )
     except KeyError:
         # No ground truth available, use the same as input
         val_truth = val_data.clone()
         print("No ground truth for val data available")
     train_truth = torch.from_numpy(data.get("train_truth", train_data.numpy()))
 
-    train_loader = DataLoader(TensorDataset(train_data, train_truth), batch_size=batch_size, shuffle=True, drop_last=False, collate_fn=circshift_collate_fn(3))
-    val_loader = DataLoader(TensorDataset(val_data, val_truth), batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        TensorDataset(train_data, train_truth),
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=False,
+        collate_fn=circshift_collate_fn(3),
+    )
+    val_loader = DataLoader(
+        TensorDataset(val_data, val_truth), batch_size=batch_size, shuffle=False
+    )
 
     criterion = nn.PoissonNLLLoss(reduction="none", log_input=True)
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
@@ -449,15 +632,18 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
     best_val_loss = float("inf")
 
     for epoch in tqdm(range(1, epochs + 1), desc="Training", unit="epoch"):
-        
+
         train_loss = train_one_epoch(
             net, train_loader, device, criterion, optimizer, mask_ratio=mask_ratio
         )
         if epoch % 10 == 0:
             val_loss, val_r2 = evaluate(
-                net, val_loader, device, criterion, 
-                mask_ratio=mask_ratio, 
-                has_ground_truth=has_ground_truth
+                net,
+                val_loader,
+                device,
+                criterion,
+                mask_ratio=mask_ratio,
+                has_ground_truth=has_ground_truth,
             )
 
             tqdm.write(
@@ -466,22 +652,26 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_model = {k: v.cpu().detach().clone() for k, v in net.state_dict().items()}
-            
+                best_model = {
+                    k: v.cpu().detach().clone() for k, v in net.state_dict().items()
+                }
+
         scheduler.step()
 
-    # Load the best model
+    # At the end, load the model with the best validation loss
+    tqdm.write(f"Best validation loss: {best_val_loss:.4f}")
+    tqdm.write("Loading best model state dict")
     net.load_state_dict(best_model)
     return net
 
 
 net = SimpleTransformerAutoencoder(
     input_dim=n_neurons,
-    num_layers=6,  
-    num_heads=1, 
-    ffn_dim=64, 
-    dropout=0.7, 
-    max_seq_len=50, 
+    num_layers=6,
+    num_heads=1,
+    ffn_dim=64,
+    dropout=0.7,
+    max_seq_len=50,
 )
 batch_size = 64
 lr = 2e-3  # Learning rate
@@ -490,12 +680,7 @@ mask_ratio = 0.25
 
 # Train the network
 train_network(
-    net,
-    dataset,
-    batch_size=batch_size,
-    lr=lr,
-    epochs=epochs,
-    mask_ratio=mask_ratio
+    net, dataset, batch_size=batch_size, lr=lr, epochs=epochs, mask_ratio=mask_ratio
 )
 
 # %% [markdown]
@@ -506,33 +691,84 @@ Let's visualize the results on some sample data. We'll take a single validation 
 """
 # %%
 # Which trial to visualize?
+def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates):
+    """Visualize the model's predictions against the true rates."""
+    plt.figure(figsize=(4, 12))
+    plt.subplot(3, 1, 1)
+    plt.imshow(
+        example_batch[0].detach().cpu().numpy().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            dataset["val_data"].shape[1] * bin_size,
+            0,
+            dataset["train_data"].shape[2],
+        ],
+    )
+    plt.title("Input spikes")
+    plt.subplot(3, 1, 2)
+    plt.imshow(
+        true_rates[0].detach().cpu().numpy().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            dataset["val_data"].shape[1] * bin_size,
+            0,
+            dataset["train_data"].shape[2],
+        ],
+    )
+    plt.title("Ground truth latents")
+    plt.subplot(3, 1, 3)
+    plt.imshow(
+        estimated_spike_rates.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            dataset["val_data"].shape[1] * bin_size,
+            0,
+            dataset["train_data"].shape[2],
+        ],
+    )
+    plt.title("Model prediction")
+    plt.show()
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 visualize_index = 2
 net.eval()
-example_batch = torch.tensor(dataset['val_data'][visualize_index:visualize_index+1, :, :]).int().to(device)
-true_rates = torch.tensor(dataset['val_truth'][visualize_index:visualize_index+1, :, :]).to(device)
+example_batch = (
+    torch.tensor(dataset["val_data"][visualize_index : visualize_index + 1, :, :])
+    .int()
+    .to(device)
+)
+true_rates = torch.tensor(
+    dataset["val_truth"][visualize_index : visualize_index + 1, :, :]
+).to(device)
 
 estimated_spike_log_rates = net(example_batch.float())
 estimated_spike_rates = torch.exp(estimated_spike_log_rates).detach().cpu().numpy()[0]
 
-plt.figure(figsize=(4, 12))
-plt.subplot(3, 1, 1)
-plt.imshow(example_batch[0].detach().cpu().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-plt.title("Input spikes")
-plt.subplot(3, 1, 2)
-plt.imshow(true_rates[0].detach().cpu().numpy().T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-plt.title("Ground truth latents")
-plt.subplot(3, 1, 3)
-plt.imshow(estimated_spike_rates.T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['train_data'].shape[2]])
-plt.title("Model prediction")
-plt.show()
+visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates)
 
 # %% [markdown]
 """
-TODO: revisit this to figure out what's going wrong exactly. It shouldn't work *well*, but it should work slightly better.
+This works rather poorly! The model is not able to reconstruct the spike rates well from the masked data. One reason is that the model has rather low capacity: it has only 6 transformer layers, and the hidden dimension is 29. Its dimensionality is the same as the number of neurons, so it has no room to learn a more complex representation.
 
-Either fix this or justify why this works very poorly. Now add the embedding linear layer:
+## Training a model with higher capacity: latent space auto-encoding
+
+One simple fix is to add a project the input data to a higher dimensional space, and then project it back to the input dimension at the end. This is a common trick in auto-encoders, and it allows the model to learn a more complex representation of the data. We'll add a linear projection layer at the beginning of the network, and a linear projection layer at the end of the network. 
+
+Thus:
+
+* The input has shape `(batch_size, n_timepoints, n_neurons)`, and we project it to a higher dimensional space `(batch_size, n_timepoints, hidden_dim)` using a linear `input_projection` layer.
+* The encoding layers then operate on this higher dimensional space, and output a tensor of size `(batch_size, n_timepoints, hidden_dim)`
+* Finally, we project the output back to the input dimension `(batch_size, n_timepoints, n_neurons)` using an `output_projection` layer.
+
+Note that `hidden_dim` can be larger or smaller than `n_neurons`, and we can change it to change the capacity of the model.
 """
+
 # %%
 class TransformerAutoencoder(nn.Module):
     def __init__(
@@ -549,9 +785,7 @@ class TransformerAutoencoder(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
 
-        self.pos_embedding = nn.Embedding(max_seq_len, hidden_dim)
-        self.register_buffer("pos_embedding_rg", torch.arange(max_seq_len))
-        self.get_positional_encoding = lambda seq_len: self.pos_embedding(self.pos_embedding_rg[:seq_len])
+        self.pos_embedding = nn.Parameter(torch.zeros(max_seq_len, hidden_dim))
 
         # Transformer encoder layers
         def create_encoder_layer() -> nn.TransformerEncoderLayer:
@@ -565,7 +799,9 @@ class TransformerAutoencoder(nn.Module):
             )
 
         self.input_projection = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.encoder_layers = nn.ModuleList([create_encoder_layer() for _ in range(num_layers)])
+        self.encoder_layers = nn.ModuleList(
+            [create_encoder_layer() for _ in range(num_layers)]
+        )
         self.norm = nn.LayerNorm(hidden_dim)
         # This projects the output back to the input dimension
         self.output_projection = nn.Linear(hidden_dim, input_dim)
@@ -581,28 +817,30 @@ class TransformerAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor, return_latents=False, mask=None):
         """
         Forward pass of the transformer autoencoder.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
             return_latents: If True, return the latents (the output of the transformer encoder)
             mask: Optional mask tensor of shape (batch_size, seq_len) to apply to the input
-            
+
         Returns:
             Reconstructed tensor of shape (batch_size, seq_len, input_dim)
         """
         batch_size, seq_len, feature_dim = x.shape
 
         # Project input and add positional encoding
-        x = self.dropout(x)  
-        x = math.sqrt(self.hidden_dim) * self.input_projection(x) + self.get_positional_encoding(seq_len).unsqueeze(0)
         x = self.dropout(x)
-        
+        x = math.sqrt(self.hidden_dim) * self.input_projection(
+            x
+        ) + self.pos_embedding[:seq_len, :].unsqueeze(0)
+        x = self.dropout(x)
+
         # Pass through transformer encoder layers
         for layer in self.encoder_layers:
             x = layer(x, mask)
 
-        x = self.norm(x) # Final layer normalization
-        if return_latents: 
+        x = self.norm(x)  # Final layer normalization
+        if return_latents:
             x_latents = x.clone()  # Save latents if requested
 
         x = self.dropout(x)
@@ -613,14 +851,26 @@ class TransformerAutoencoder(nn.Module):
         else:
             return x
 
+# %% [markdown]
+"""
+Notice the key differences from the previous model:
+
+* The input projection layer projects the input data to a higher dimensional space (`hidden_dim`), which is larger than the number of neurons.
+* The output projection layer projects the output back to the input dimension (`input_dim`).
+* An additional dropout is applied after the input projection and before the output projection, as well as after the transformer layers.
+
+Let's train this model on the same data as before, and see how it performs.
+"""
+# %% 
+
 net = TransformerAutoencoder(
     input_dim=n_neurons,
     hidden_dim=128,
-    num_layers=4,  
-    num_heads=1, 
-    ffn_dim=128, 
-    dropout=0.7, 
-    max_seq_len=50, 
+    num_layers=4,
+    num_heads=1,
+    ffn_dim=128,
+    dropout=0.7,
+    max_seq_len=50,
 )
 batch_size = 64
 lr = 2e-3  # Learning rate
@@ -629,79 +879,72 @@ mask_ratio = 0.25
 
 # Train the network
 train_network(
-    net,
-    dataset,
-    batch_size=batch_size,
-    lr=lr,
-    epochs=epochs,
-    mask_ratio=mask_ratio
+    net, dataset, batch_size=batch_size, lr=lr, epochs=epochs, mask_ratio=mask_ratio
 )
+
+# %% 
+"""
+Training converged, and the R^2 looks much better than before! Let's visualize the results on some sample data, as we did before."""
 
 # %%
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 visualize_index = 0
-example_batch = torch.tensor(dataset['val_data'][visualize_index:visualize_index+1, :, :]).int().to(device)
-true_rates = torch.tensor(dataset['val_truth'][visualize_index:visualize_index+1, :, :]).to(device)
+example_batch = (
+    torch.tensor(dataset["val_data"][visualize_index : visualize_index + 1, :, :])
+    .int()
+    .to(device)
+)
+true_rates = torch.tensor(
+    dataset["val_truth"][visualize_index : visualize_index + 1, :, :]
+).to(device)
 
 net.eval()
 estimated_spike_log_rates = net(example_batch.float())
 estimated_spike_rates = torch.exp(estimated_spike_log_rates).detach().cpu().numpy()[0]
-
-plt.figure(figsize=(4, 12))
-plt.subplot(4, 1, 1)
-plt.imshow(example_batch[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
-plt.title("Input spikes")
-plt.subplot(4, 1, 2)
-plt.imshow(true_rates[0].detach().cpu().numpy().T, aspect="auto", origin="lower")
-plt.title("Ground truth latents")
-plt.subplot(4, 1, 3)
-plt.imshow(estimated_spike_rates.T, aspect="auto", origin="lower")
-plt.title("Model prediction")
-plt.subplot(4, 1, 4)
-plt.plot(estimated_spike_rates.T.ravel(), true_rates[0].detach().cpu().numpy().T.ravel(), '.', markersize=2)
-plt.xlabel("Estimated spike rates")
-plt.ylabel("True spike rates")
-plt.tight_layout()
-plt.show()
+visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates)
 
 # %% [markdown]
 """
-That looks better. An advantage of doing the autoencoding in latent space is that we can flexibly change the latent dimensionality of the network, increasing the capacity of the model without affecting the number of layers. 
+That looks much better. An advantage of doing the autoencoding in latent space is that we can flexibly change the latent dimensionality of the network, increasing the capacity of the model without affecting the number of layers. 
 
-Does the latent space encode something interesting about the dynamical system that generated this data? Transformers have a reputation as black boxes, but nothing prevents us from looking at what's inside the models to learn about how they operate. We can verify this by looking at the weights of the model. Let's use PCA to determine the measure the top PCs of the input embedding matrix and the output readout matrix.
+Does the latent space encode something interesting about the dynamical system that generated this data? Transformers have a reputation as black boxes, but nothing prevents us from looking at what's inside the models to learn about how they operate. We can verify this by looking at the weights of the model. Let's use PCA to determine the measure the top PCs of the input and output projection matrices.
 """
 # %%
+def display_singular_values(Si, So, Vi, Uo):
+    plt.figure(figsize=(8, 8))
+    plt.subplot(2, 2, 1)
+    plt.plot(Si, "o-", label="Input embedding singular values")
+    plt.xlabel("Singular value index")
+    plt.title("Input embedding singular values")
+    plt.subplot(2, 2, 2)
+    plt.plot(So, "o-", label="Output readout singular values")
+    plt.xlabel("Singular value index")
+    plt.title("Output readout singular values")
+    plt.subplot(2, 2, 3)
+    plt.plot(rectify(Vi[:3, :].T))
+    plt.xlabel("Neuron #")
+    plt.ylabel("Loading")
+    plt.title("Top 3 input projection singular vectors")
+    plt.subplot(2, 2, 4)
+    plt.plot(rectify(Uo[:, :3]))
+    plt.xlabel("Neuron #")
+    plt.ylabel("Loading")
+    plt.title("Top 3 output projection singular vectors")
+    plt.tight_layout()
+
 Wi = net.input_projection.weight.detach().cpu().numpy()
 Wo = net.output_projection.weight.detach().cpu().numpy()
 
 Ui, Si, Vi = np.linalg.svd(Wi, full_matrices=False)
 Uo, So, Vo = np.linalg.svd(Wo, full_matrices=False)
 
+
 def rectify(x):
     """Rectify a matrix by setting negative values to zero."""
     return x * np.sign(x.mean(axis=0, keepdims=True))
 
-plt.figure(figsize=(8, 8))
-plt.subplot(2, 2, 1)
-plt.plot(Si, 'o-', label='Input embedding singular values')
-plt.xlabel('Singular value index')
-plt.title('Input embedding singular values')
-plt.subplot(2, 2, 2)
-plt.plot(So, 'o-', label='Output readout singular values')
-plt.xlabel('Singular value index')
-plt.title('Output readout singular values')
-plt.subplot(2, 2, 3)
-plt.plot(rectify(Vi[:3, :].T))
-plt.xlabel('Neuron #')
-plt.ylabel('Loading')
-plt.title('Top 3 input projection singular vectors')
-plt.subplot(2, 2, 4)
-plt.plot(rectify(Uo[:, :3]))
-plt.xlabel('Neuron #')
-plt.ylabel('Loading')
-plt.title('Top 3 output projection singular vectors')
-plt.tight_layout()
+display_singular_values(Si, So, Vi, Uo)
 
 # %% [markdown]
 """
@@ -716,7 +959,11 @@ Thus, it appears the model has leveraged the fact that the data lies on a low-ra
 """
 # Real data: `mc_maze`
 
-Now that we've gotten a handle on working with toy data, let's switch over to real data. A typical experiment where you might want to apply a foundation model for neuroscience is a BCI decoding experiment. In the `mc_maze` series of datasets (`mc_maze`, `mc_maze_large`, `mc_maze_medium`, `mc_maze_small`), a monkey completes a reaching task where he needs to trace with his finger on a touchscreen from a start position to an end position, avoiding the maze walls. Neurons are recorded in premotor cortex (PMd) and in M1. 
+Now that we've gotten a handle on working with toy data, let's switch over to real data. One core application of foundation models for neuroscience is for BCI decoding. Let's train and apply our model to a BCI decoding experiment.
+
+In the `mc_maze` series of datasets (`mc_maze`, `mc_maze_large`, `mc_maze_medium`, `mc_maze_small`; [Churchland et al. 2010](https://pubmed.ncbi.nlm.nih.gov/21040842/)), a monkey completes a reaching task where he needs to trace with his finger on a touchscreen from a start position to an end position, avoiding the maze walls. Neurons are recorded in premotor cortex (PMd) and in M1. 
+
+![mc_maze dataset](images/mc_maze.png)
 
 The data is similarly structured to the Lorenz dataset, with a few key differences:
 
@@ -729,60 +976,103 @@ Let's start by visualizing this data.
 
 dataset = load_dataset("mc_maze_medium")
 
-# One figure, two axes stacked vertically
-fig, (ax_top, ax_bottom) = plt.subplots(
-    nrows=2, ncols=2,           # two rows, one column
-    gridspec_kw={'height_ratios': [1, 2], 'width_ratios': [1, 1]},  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
-    figsize=(6, 8),             # any size you like
-    sharex=False                 # optional: share the x-axis
-)
+def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
+    """Visualize a single trial of the mc_maze dataset."""
+    # One figure, two axes stacked vertically
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        nrows=2,
+        ncols=2,  # two rows, one column
+        gridspec_kw={
+            "height_ratios": [1, 2],
+            "width_ratios": [1, 1],
+        },  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
+        figsize=(6, 8),  # any size you like
+        sharex=False,  # optional: share the x-axis
+    )
 
-bin_size = .01
+    nt, n_neurons = trial_spikes.shape[0], trial_spikes.shape[1]
 
-ax_top[0].plot(np.arange(dataset['val_behavior'].shape[1]) * bin_size, dataset['val_behavior'][0, :])
-ax_top[0].legend(['Velocity (x)', 'Velocity (y)'])
-ax_top[0].set_xlim(0, dataset['train_behavior'].shape[1] * bin_size)
-ax_top[0].set_ylim(-1, 1)
-ax_top[0].set_xlabel('Time (s)')
-ax_top[0].set_ylabel('Velocity (m/s)')
+    bin_size = 0.01
 
-ax_top[1].plot(bin_size * np.cumsum(dataset['val_behavior'][0, :, 0]), bin_size * np.cumsum(dataset['val_behavior'][0, :, 1]), '-.')
-ax_top[1].set_xlabel('x position (m)')
-ax_top[1].set_ylabel('y position (m)')
-ax_top[1].set_xlim([-.2, .2])
-ax_top[1].set_ylim([-.2, .2])
-ax_top[1].plot(np.cumsum(dataset['val_behavior'][0, :, 0])[-1], np.cumsum(dataset['val_behavior'][0, :, 1])[-1], 'gx')  # mark the end
-ax_top[1].plot(0, 0, 'ro')
+    ax_top[0].plot(
+        np.arange(nt) * bin_size,
+        trial_behavior,
+    )
+    ax_top[0].legend(["Velocity (x)", "Velocity (y)"])
+    ax_top[0].set_xlim(0, nt * bin_size)
+    ax_top[0].set_ylim(-1, 1)
+    ax_top[0].set_xlabel("Time (s)")
+    ax_top[0].set_ylabel("Velocity (m/s)")
 
-ax_bottom[0].imshow(dataset['val_data'][0, :, :].T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_data'].shape[1] * bin_size, 0, dataset['val_data'].shape[2]])
-ax_bottom[0].set_xlabel('Time (s)')
-ax_bottom[0].set_ylabel('Neuron #')
-ax_bottom[0].set_title('Spikes')
+    ax_top[1].plot(
+        bin_size * np.cumsum(trial_behavior[:, 0]),
+        bin_size * np.cumsum(trial_behavior[:, 1]),
+        "-.",
+    )
+    ax_top[1].set_xlabel("x position (m)")
+    ax_top[1].set_ylabel("y position (m)")
+    ax_top[1].set_xlim([-0.2, 0.2])
+    ax_top[1].set_ylim([-0.2, 0.2])
+    ax_top[1].plot(
+        np.cumsum(trial_behavior[:, 0])[-1],
+        np.cumsum(trial_behavior[:, 1])[-1],
+        "gx",
+    )  # mark the end
+    ax_top[1].plot(0, 0, "ro")
 
-ax_bottom[1].imshow(dataset['val_truth'][0, :, :].T, cmap='gray_r', aspect='auto', extent=[0, dataset['val_truth'].shape[1] * bin_size, 0, dataset['val_truth'].shape[2]])
-ax_bottom[1].set_xlabel('Time (s)')
-ax_bottom[1].set_ylabel('Neuron #')
-ax_bottom[1].set_title('Ground truth (smoothed data)')
+    ax_bottom[0].imshow(
+        trial_spikes.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    ax_bottom[0].set_xlabel("Time (s)")
+    ax_bottom[0].set_ylabel("Neuron #")
+    ax_bottom[0].set_title("Spikes")
 
-plt.tight_layout()
+    ax_bottom[1].imshow(
+        trial_truth.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    ax_bottom[1].set_xlabel("Time (s)")
+    ax_bottom[1].set_ylabel("Neuron #")
+    ax_bottom[1].set_title("Ground truth (smoothed data)")
+
+    plt.tight_layout()
+
+trial_spikes = dataset["val_data"][0, :, :]  # First trial spikes
+trial_truth = dataset["val_truth"][0, :, :]
+trial_behavior = dataset["val_behavior"][0, :]  # First trial behavior
+visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior)
 
 # %% [markdown]
 """
-We can proceed as we did previously to train a masked autoencoder on this data. 
+As we did with the Lorenz dataset, let's learn a masked autoencoder on this data. We'll use the same `TransformerAutoencoder` class we defined earlier, but with different hyperparameters. 
 """
 # %%
-# For reproducibility. This model is somewhat finicky, and doesn't always converge. In practice 
-# one might want to pick several random seeds and pick the best outcome. That would take a long time,
-# so here we just set a fixed seed.
-torch.manual_seed(42)  
+# For reproducibility. This model is somewhat finicky, and doesn't always converge. In practice
+# one might want to pick several random seeds and pick the best outcome. That would take a long time, so here we just set a fixed seed.
+torch.manual_seed(42)
 net = TransformerAutoencoder(
-    input_dim=dataset['train_data'].shape[2],
+    input_dim=dataset["train_data"].shape[2],
     hidden_dim=256,
-    num_layers=6,  
-    num_heads=2, 
-    ffn_dim=128, 
-    dropout=0.7, 
-    max_seq_len=70, 
+    num_layers=6,
+    num_heads=2,
+    ffn_dim=128,
+    dropout=0.7,
+    max_seq_len=70,
 )
 batch_size = 32
 lr = 1e-2  # Learning rate
@@ -791,12 +1081,7 @@ mask_ratio = 0.25
 
 # Train the network
 train_network(
-    net,
-    dataset,
-    batch_size=batch_size,
-    lr=lr,
-    epochs=epochs,
-    mask_ratio=mask_ratio
+    net, dataset, batch_size=batch_size, lr=lr, epochs=epochs, mask_ratio=mask_ratio
 )
 
 # To easily recover the model once we've trained it.
@@ -804,22 +1089,18 @@ saved_state_dict = {k: v.cpu().detach().clone() for k, v in net.state_dict().ite
 
 # %% [markdown]
 """
-That worked! Now we have a reasonable representation of the data, but we are not yet able to decode the behavior, for example for a brain computer interface.
+That worked! Now we have a reasonable representation of the data. Now, how do we use this hidden representation for BCI decoding with transformers? One approach is to use **transfer learning**: first train a transformer on a masked autoencoding task, then fine-tune it on the BCI decoding task. 
 
-So how could we use this for BCI decoding with transformers? Well, we could:
+The key step is to use the latents from the masked autoencoder as input to the BCI decoder. By latents, we mean the output of the transformer encoder layers, before the output projection layer. We'll grab these latents using TransformerAutoencoder's `return_latents` argument and train a lightweight decoder on top of them.
 
-* Supervised learning: Train a transformer from scratch end-to-end to predict the desired behavior
-* Supervised learning + auxillary loss: Train a transformer to both reconstruct the input AND predict the desired behavior
-* Transfer learning: First train a transformer on a masked autoencoding task, then fine-tune it on the BCI decoding task
-
-In this tutorial, we'll focus on the final approach. Our TransformerAutoencoder implementation already has a `return_latents` argument that allows us to return the latents from the forward pass. We can use this to train a BCI decoder on top of the latents.
-
-Let's create a lightweight shim on top of the TransformerAutoencoder that allows us to train a BCI decoder on top of the latents. We'll use the simplest setup, where the sampling rate of the behavior is the same as the sampling rate of the spikes, and spikes and behavior are already aligned temporally. In that case, we can just use a lightweight linear layer to decode the behavior from the latents: one token = one timepoint = one behavioral sample. Note that you could use a more powerful decoder like another transformer, or shift things so you have a different sampling rate than the spikes---see the references for details.
+Let's create a lightweight shim on top of the TransformerAutoencoder that allows us to train a BCI decoder on top of the latents. We'll use the simplest setup, where the sampling rate of the behavior is the same as the sampling rate of the spikes, and spikes and behavior are already aligned temporally. In that case, we can just use a linear layer to decode the behavior from the latents: one token = one timepoint = one behavioral sample. Note that you could use a more powerful decoder like another transformer, or use sophisticated mechanisms to handle different sampling rates than the spikes---see the references for details.
 """
+
+
 # %% [markdown]
 class TransformerWithDecoder(nn.Module):
     """Combines pretrained PM Transformer with behavior decoder."""
-    
+
     def __init__(
         self,
         transformer: nn.Module,
@@ -830,22 +1111,15 @@ class TransformerWithDecoder(nn.Module):
         self.transformer = transformer
 
         hidden_dim = transformer.hidden_dim
-            
-        self.decoder = nn.Linear(
-            in_features=hidden_dim,
-            out_features=behavior_dim
-        )
-        
+        self.decoder = nn.Linear(in_features=hidden_dim, out_features=behavior_dim)
+
         self.set_freeze_transformer(freeze_transformer)
-                
+
     def set_freeze_transformer(self, freeze: bool):
         """Freeze or unfreeze transformer parameters."""
         for param in self.transformer.parameters():
             param.requires_grad = not freeze
-            
-        # DO NOT FREEZE THE INPUT LAYER
-        self.transformer.input_projection.weight.requires_grad = True
-                
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -855,17 +1129,17 @@ class TransformerWithDecoder(nn.Module):
         """
         # Get internal representations
         _, h = self.transformer.forward(x=x, return_latents=True)
-            
+
         # Decode behavior from representations
         behavior = self.decoder(h)
-        
+
         return behavior
+
 
 # %% [markdown]
 """
 Now we're ready to train this. We set up another training loop. Note that this time, our criterion will be the MSE loss, since we're predicting continuous behavior values. We also use far more conservative dropout rate.
 """
-
 def finetune_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -876,31 +1150,34 @@ def finetune_one_epoch(
     model.train()
     epoch_losses = []
     epoch_r2s = []
-    
+
     criterion_mse = nn.MSELoss()
-    
+
     for spikes, behavior in loader:
         spikes = spikes.to(device).float()
         behavior = behavior.to(device).float()
-        
+
         optimizer.zero_grad()
-        
+
         # Forward pass
         pred_behavior = model(spikes)
-        
+
         # Compute loss
-        loss = criterion_mse(pred_behavior.reshape(-1, pred_behavior.shape[-1]), behavior.reshape(-1, behavior.shape[-1]))
-        
+        loss = criterion_mse(
+            pred_behavior.reshape(-1, pred_behavior.shape[-1]),
+            behavior.reshape(-1, behavior.shape[-1]),
+        )
+
         # Backward pass
         loss.backward()
         optimizer.step()
-        
+
         # Track metrics
         epoch_losses.append(loss.item())
         with torch.no_grad():
             r2 = calculate_pseudo_r2(pred_behavior, behavior)
             epoch_r2s.append(r2)
-    
+
     return float(np.mean(epoch_losses)), float(np.mean(epoch_r2s))
 
 
@@ -913,56 +1190,57 @@ def finetune_evaluate(
     model.eval()
     losses = []
     r2s = []
-    
+
     criterion_mse = nn.MSELoss()
-    
+
     with torch.no_grad():
         for spikes, behavior in loader:
             spikes = spikes.to(device).float()
             behavior = behavior.to(device).float()
-            
+
             # Forward pass
             pred_behavior = model(spikes)
-            
+
             # Compute metrics
             loss = criterion_mse(pred_behavior, behavior)
-            r2 = compute_r2(pred_behavior, behavior)
-            
+            r2 = calculate_pseudo_r2(pred_behavior, behavior)
+
             losses.append(loss.item())
             r2s.append(r2.item())
-    
+
     return float(np.mean(losses)), float(np.mean(r2s))
 
+
 def finetune_bci_decoder(
-        model: nn.Module,
-        dataset,
-        batch_size,
-        lr,
-        epochs,
-    ):
+    model: nn.Module,
+    dataset,
+    batch_size,
+    lr,
+    epochs,
+):
     train_loader = DataLoader(
         TensorDataset(
-            torch.from_numpy(dataset['train_data']).int(),
-            torch.from_numpy(dataset['train_behavior']).float(),
+            torch.from_numpy(dataset["train_data"]).int(),
+            torch.from_numpy(dataset["train_behavior"]).float(),
         ),
         batch_size=batch_size,
         shuffle=True,
-        drop_last=True
+        drop_last=True,
     )
     val_loader = DataLoader(
         TensorDataset(
-            torch.from_numpy(dataset['val_data']).int(),
-            torch.from_numpy(dataset['val_behavior']).float(),
+            torch.from_numpy(dataset["val_data"]).int(),
+            torch.from_numpy(dataset["val_behavior"]).float(),
         ),
         batch_size=batch_size,
         shuffle=False,
-        drop_last=False
+        drop_last=False,
     )
 
     # Create new optimizer with all parameters
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=lr * 0.1  # Use lower learning rate for fine-tuning
+        lr=lr * 0.1,  # Use lower learning rate for fine-tuning
     )
     scheduler = WarmupCosineSchedule(
         optimizer,
@@ -984,31 +1262,37 @@ def finetune_bci_decoder(
             )
             if val_r2 > best_val_r2:
                 best_val_r2 = val_r2
-                best_model = {k: v.cpu().detach().clone() for k, v in model.state_dict().items()}
+                best_model = {
+                    k: v.cpu().detach().clone() for k, v in model.state_dict().items()
+                }
     model.load_state_dict(best_model)
     return model, best_val_r2
 
 
-# % [markdown]
+# %% [markdown]
 """
+Note that the training loop is similar to the one we used for training the masked autoencoder, but now we use MSE loss instead of Poisson NLL loss, and we don't mask the data. The model is trained to predict the behavior from the latents, which are the output of the transformer encoder.
+
 Now we're ready to train the model. We'll use two different training modes:
 * Frozen encoder: We freeze the transformer encoder and only train the decoder. This is useful for transfer learning, where we want to leverage the pretrained representations.
 * End-to-end training: We unfreeze the transformer encoder and train the entire model end-to-end. This is useful for fine-tuning the model on the specific task.
 """
 
-# %
+# %%
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 results = []
 for frozen_encoder in [True, False]:
     # Create the model with frozen transformer
-    print(f"Training with {'frozen' if frozen_encoder else 'unfrozen'} transformer encoder")
-    
+    print(
+        f"Training with {'frozen' if frozen_encoder else 'unfrozen'} transformer encoder"
+    )
+
     # Load the pretrained transformer autoencoder.
     net.load_state_dict(saved_state_dict)
     net.reset_dropout(0.1)  # Reset dropout to a lower value for fine-tuning
     model = TransformerWithDecoder(
         transformer=net,
-        behavior_dim=dataset['train_behavior'].shape[2],
+        behavior_dim=dataset["train_behavior"].shape[2],
         freeze_transformer=frozen_encoder,  # Freeze the transformer encoder
     )
     model = model.to(device)
@@ -1026,8 +1310,12 @@ for frozen_encoder in [True, False]:
     )
     results.append(
         {
-            'method': 'linear on top of frozen mc_maze_medium checkpoint' if frozen_encoder else 'fine-tune from mc_maze_medium checkpoint (end-to-end)',
-            'best_val_r2': best_r2
+            "method": (
+                "linear on top of frozen mc_maze_medium checkpoint"
+                if frozen_encoder
+                else "fine-tune from mc_maze_medium checkpoint (end-to-end)"
+            ),
+            "best_val_r2": best_r2,
         }
     )
 
@@ -1037,57 +1325,55 @@ Great! We see that the performance of the BCI decoder is quite a bit better when
 
 But how well does the model perform on the BCI decoding task compared to alternatives? We have to compare our model against baselines!
 
-Let's make up two baselines:
+Let's create two baselines:
 
-* Linear decoder: we'll have a simple linear decoder on top of smoothed spikes.
-* Transformer decoder trained from scratch: we'll train a transformer from scratch on the BCI decoding task.
-
-Then we'll have a clear baseline to compare against.
+* Linear decoder: a simple linear decoder on top of smoothed spikes.
+* Transformer decoder trained from scratch: a (smaller) transformer trained from scratch on the BCI decoding task, without leveraging the pretraining task.
 """
 # %%
-
 def gaussian_smooth_1d(x, sigma=5):
     """
     Apply Gaussian smoothing along the time dimension.
-    
+
     Args:
         x: Input tensor of shape (batch, time, neurons)
         sigma: Standard deviation of Gaussian kernel
-    
+
     Returns:
         Smoothed tensor of same shape as input
     """
     batch, time, neurons = x.shape
-    
+
     # Create Gaussian kernel
     # Kernel size should be odd and large enough to capture the Gaussian
     kernel_size = int(6 * sigma + 1)  # 6 sigma captures 99.7% of distribution
     if kernel_size % 2 == 0:
         kernel_size += 1  # Ensure odd size
-    
+
     # Create 1D Gaussian kernel
     kernel = torch.arange(kernel_size, dtype=torch.float32)
     kernel = kernel - kernel_size // 2  # Center around 0
     kernel = torch.exp(-0.5 * (kernel / sigma) ** 2)
     kernel = kernel / kernel.sum()  # Normalize
-    
+
     # Move kernel to same device as input
     kernel = kernel.to(x.device)
-    
+
     # Reshape for conv1d: (batch, time, neurons) -> (batch * neurons, 1, time)
     x_reshaped = x.permute(0, 2, 1).reshape(batch * neurons, 1, time)
-    
+
     # Reshape kernel for conv1d: needs shape (out_channels, in_channels, kernel_size)
     kernel = kernel.view(1, 1, -1)
-    
+
     # Apply convolution with padding to maintain time dimension
     padding = kernel_size // 2
     x_smoothed = F.conv1d(x_reshaped, kernel, padding=padding)
-    
+
     # Reshape back: (batch * neurons, 1, time) -> (batch, time, neurons)
     x_smoothed = x_smoothed.view(batch, neurons, time).permute(0, 2, 1)
-    
+
     return x_smoothed
+
 
 class SmoothDecoder(nn.Module):
     def __init__(self, input_dim, output_dim, sigma):
@@ -1101,18 +1387,19 @@ class SmoothDecoder(nn.Module):
     def forward(self, x):
         """
         Forward pass of the smooth transformer.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
-            
+
         Returns:
             Reconstructed tensor of shape (batch_size, seq_len, input_dim)
         """
         # Apply Gaussian smoothing
         x_smoothed = gaussian_smooth_1d(x, self.sigma)
-        
+
         # Pass through the transformer
         return self.output_decoder(x_smoothed)
+
 
 # Train the model with a smooth decoder
 
@@ -1121,8 +1408,8 @@ lr = 5e-2  # Learning rate
 epochs = 500  # Number of epochs to train
 # Train the model with frozen transformer
 model = SmoothDecoder(
-    input_dim=dataset['train_data'].shape[2],
-    output_dim=dataset['train_behavior'].shape[2],
+    input_dim=dataset["train_data"].shape[2],
+    output_dim=dataset["train_behavior"].shape[2],
     sigma=5,  # Standard deviation for Gaussian smoothing
 )
 model.to(device)
@@ -1135,30 +1422,30 @@ model, val_r2 = finetune_bci_decoder(
     epochs=epochs,
 )
 
-results.append(
-    {
-        'method': 'linear on top of smoothed spikes',
-        'best_val_r2': val_r2
-    }
-)
+results.append({"method": "linear on top of smoothed spikes", "best_val_r2": val_r2})
+
+# %% [markdown]
+"""
+Now let's train a transformer decoder from scratch. This is a smaller transformer than the one we used for pretraining, since we don't need as much capacity to decode the behavior. We'll use the same training loop as before, but this time we'll train the entire model end-to-end.
+"""
 
 # %%
 # Train a transformer decoder from scratch
 lr = 1e-1  # Learning
 epochs = 1000  # Number of epochs to train
 supervised_net = TransformerAutoencoder(
-    input_dim=dataset['train_data'].shape[2],
+    input_dim=dataset["train_data"].shape[2],
     hidden_dim=32,
     num_layers=4,
     num_heads=1,
     ffn_dim=128,
-    dropout=0.1
+    dropout=0.1,
 )
 
 # Train with a transformer decoder from scratch
 model = TransformerWithDecoder(
     transformer=supervised_net,
-    behavior_dim=dataset['train_behavior'].shape[2],
+    behavior_dim=dataset["train_behavior"].shape[2],
     freeze_transformer=False,  # Unfreeze the transformer encoder
 )
 model = model.to(device)
@@ -1171,34 +1458,39 @@ model, val_r2 = finetune_bci_decoder(
     epochs=epochs,
 )
 
-results.append(
-    {
-        'method': 'supervised',
-        'best_val_r2': val_r2
-    }
-)
+results.append({"method": "supervised", "best_val_r2": val_r2})
 
 # %% [markdown]
 """
 We notice a few important trends:
 
 * The fine-tuned model performs better than the frozen model, which is expected since it can adapt the representations to the specific task.
-* The smooth linear decoder underperforms compared to the fine-tuned model, which is expected since it does not leverage the pretrained representations.
-* The supervised transformer decoder performs a bit better then the fine-tuned model
+* The smooth linear decoder underperforms compared to the fine-tuned model, which is expected since it doesn't have as much capacity as the transformer decoders.
+* The supervised transformer decoder performs a bit better then the fine-tuned model.
 
-This is a bit disappointing, since we want our pretrained model to allow us better transfer than training from scratch. It's not too surprising, however: the `mc_maze_medium` dataset is fairly small, and so the pretraining doesn't help much. The promise of a foundation model is to pretrain on a large dataset---potentially many orders of magnitude larger than the fine-tuning task---, and then fine-tune on the smaller dataset. Let's do that next.
+This is a bit disappointing: we went through the trouble of pretraining because we expected that it would yield improved decoding. It's not too surprising, however: the `mc_maze_medium` dataset is fairly small, and so the pretraining doesn't learn a sufficiently good representation to obtain a significant lift on the decoding task. The promise of a foundation model is to pretrain on a **large** dataset---potentially many orders of magnitude larger than the fine-tuning task---, and then fine-tune on the smaller dataset. Let's do that next.
 
 # Transfer learning from a larger model
 
-In practice, what we typically do with foundation models for neuroscience is to train a large model on a large dataset, and then finetune on a smaller dataset. We'll explore this setup here. 
+To train a foundation model for neuroscience, we need a large dataset. `mc_maze_medium` only contains about two hundred trials, which is not enough to train a good representation. Instead, we'll use the `mc_maze` dataset, which contains about 10 times that. This is still fairly small by foundation model standards, but it contains thousands of trials from which to learn a good representation. In the real world, you would typically train on much larger datasets like you might find on DANDI. But this is enough to demonstrate the core ideas.
 
-What we've done is train a model offline on the full `mc_maze` dataset. This is still fairly small by foundation model standards, but it contains thousands of trials from which to learn a good representation. In the real world, you would typically train on much larger datasets like you might find on DANDI. But this is enough to demonstrate the core ideas.
+I've already trained a model on the `mc_maze` dataset, and saved the weights to a file. You can find the weights in the `scripts` directory of this repository, in the file `mc_maze_tuned.pt`. If you wanted to train the model yourself, you could do so by running the `scripts/train_autoencoder.py` script, specifically with these parameters: 
 
-Now we'll load up the weights and transfer it to the `mc_maze_medium` dataset. There's one very important thing we'll need to take care of, however:
+```
+python train_autoencoder.py --hidden-dim 256 --dropout 0.7 --epochs 10000 --pos-encoding learned --mask-ratio 0.25 --dataset mc_maze --checkpoint mc_maze_tuned.pt --projection linear --lr 2e-3 --use-wandb --model pm --num-heads 2 --num-layers 6 --context-forward 0 --context-backward 0 --ffn-dim 256 --batch-size 64 --delta 3
+```
 
-## Changing the input dimensionality
+It will take about an hour to train. Here we'll just load the pretrained model weights and transfer them to the `mc_maze_medium` dataset. There's one very important thing we'll need to take care of, however:
 
-Although the `mc_maze` series of datasets were all collected in the animal with the same implants, there are different numbers of neurons recorded in each dataset. Thus, we can't use the entire model weights: we'll need to carefully swap the input and output projection layers to match the new number of neurons.
+## Adapting the model to a new dataset
+
+One challenge with using pretrained models in neuroscience is that the neurons recorded vary from dataset to dataset. That's quite different than a language model where the vocabulary will stay constant when using across datasets. 
+
+We need to carefully adapt our pretrained model to the new dataset. Conceptually, we think that *what is conserved* across datasets is how neural data is represented in latent space. What is *not conversed* is the projections from the input space to the latent space, and back.
+
+In fact, the `mc_maze` dataset and `mc_maze_medium` datasets have different numbers of neurons. This means that the input and output projection layers of the pretrained model will not match the new dataset, and we have to learn them from scratch.
+
+For example, the `mc_maze` dataset contains 29 neurons, while the `mc_maze_medium` dataset contains only 16 neurons. This means that we can't use the entire model weights as they are: we'll need to adapt the input and output projection layers to match the new number of neurons. We'll need to carefully swap the input and output projection layers to match the new number of neurons.
 
 Then we'll go ahead and train the model and see how well it performs on the new dataset.
 """
@@ -1206,7 +1498,7 @@ Then we'll go ahead and train the model and see how well it performs on the new 
 
 # Load the pretrained model
 net = TransformerAutoencoder(
-    input_dim=dataset['train_data'].shape[2],
+    input_dim=dataset["train_data"].shape[2],
     hidden_dim=256,
     num_layers=6,
     num_heads=2,
@@ -1219,7 +1511,7 @@ net = TransformerAutoencoder(
 torch.serialization.add_safe_globals([argparse.Namespace])
 pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
 ckpt = torch.load(pretrained_model_path, map_location=device)
-state_dict = ckpt['model_state_dict']
+state_dict = ckpt["model_state_dict"]
 try:
     net.load_state_dict(state_dict, strict=True)
 except RuntimeError as e:
@@ -1227,18 +1519,18 @@ except RuntimeError as e:
 
 # %% [markdown]
 """
-Notice that this returned an error, because the input and output projection layers don't match the new number of neurons. We'll need to overwrite them.
+Notice that this returned an error, because the input and output projection layers of the model pretrained on `mc_maze` don't match the new number of neurons in `mc_maze_medium`. We'll need to overwrite them.
 """
 # %%
 # The input and output projection layers need to match the new number of neurons, so we'll just use the weights that are already in the model.
-state_dict['input_projection.weight'] = net.input_projection.weight.data.detach()
-state_dict['output_projection.weight'] = net.output_projection.weight.data.detach()
-state_dict['output_projection.bias'] = net.output_projection.bias.data.detach()
+state_dict["input_projection.weight"] = net.input_projection.weight.data.detach()
+state_dict["output_projection.weight"] = net.output_projection.weight.data.detach()
+state_dict["output_projection.bias"] = net.output_projection.bias.data.detach()
 net.load_state_dict(state_dict, strict=True)
 
 # %%
 """
-Now we're ready to train the model on the new dataset. We'll use the same training loop as before, but this time we'll train the entire model end-to-end.
+Now we're ready to train the model on the new dataset! The input and output projection layers will be trained as part of the fine-tuning process.
 """
 # %%
 batch_size = 64
@@ -1247,10 +1539,10 @@ epochs = 500  # Number of epochs to train
 
 net = net.to(device)
 model = TransformerWithDecoder(
-        transformer=net,
-        behavior_dim=dataset['train_behavior'].shape[2],
-        freeze_transformer=False,  # Unfreeze the transformer encoder
-    ).to(device)
+    transformer=net,
+    behavior_dim=dataset["train_behavior"].shape[2],
+    freeze_transformer=False,  # Unfreeze the transformer encoder
+).to(device)
 model, val_r2 = finetune_bci_decoder(
     model=model,
     dataset=dataset,
@@ -1259,9 +1551,8 @@ model, val_r2 = finetune_bci_decoder(
     epochs=epochs,
 )
 results.append(
-    {'method': 'fine-tune from mc_maze checkpoint (end-to-end)', 
-     'best_val_r2': val_r2
-})
+    {"method": "fine-tune from mc_maze checkpoint (end-to-end)", "best_val_r2": val_r2}
+)
 
 # %% [markdown]
 """
@@ -1271,15 +1562,21 @@ Let's see all the scores of the different model variants we've tried on this dat
 """
 # %%
 
-pd.DataFrame(results).set_index('method').sort_values('best_val_r2', ascending=False)
+pd.DataFrame(results).set_index("method").sort_values("best_val_r2", ascending=False)
 
+# %%
+"""
+Where foundation models especially shine is when we have very large pretraining datasets, and very small fine-tuning datasets. You can try, for example, to finetune the `mc_maze` checkpoint on one half of the `mc_maze_small` dataset (only ~40 trials). You'll see that pretraining makes a big difference, and the model can achieve a much higher R² than training from scratch.
+"""
 # %% [markdown]
 """
 # Causal decoding
 
-We just one more concept we'll need to cover: causal decoding. Thus far, we've used all spikes to predict behavior. But if we wanted to use this for online BCI decoding, we could only use spikes that have happened thus far.
+We just have one more concept to cover: causal decoding. Thus far, we've spikes from an entire trial to predict behavior. If we wanted to use this for online BCI decoding, we could only use spikes that have happened thus far. In other words, we want our predicted behavior $y_T$ to only depend on spikes that have happened up to time `T`:
 
-The fix is to use a causal transformer decoder. To prevent information from flowing from the future to the point, we'll use a mask that tells the model to only use the first token to reconstruct the first token; the first two tokens to reconstruct the second token; the first three tokens to reconstruct the third token, and so on. This is a causal decoder, and it allows us to use the model for online BCI decoding.
+$$y_T = = f([s_1, s_2, s_3, ..., s_T])$$
+
+The fix is to use a **causal** transformer decoder. To prevent information from flowing from the future to the point, we'll use a mask that tells the model to only use the first token to reconstruct the first token; the first two tokens to reconstruct the second token; the first three tokens to reconstruct the third token, and so on. This is a causal decoder, and it allows us to use the model for online BCI decoding.
 
 This mask, which is a lower triangular matrix, can be created with the `torch.tril` function. We'll use this to create a causal transformer decoder that can be used for online BCI decoding.
 
@@ -1287,9 +1584,9 @@ Confusingly, the mask should be set to False to signal that information is allow
 """
 # %%
 mask = ~torch.tril(torch.ones(50, 50, dtype=torch.bool))
-plt.imshow(mask, cmap='gray', aspect='auto')
-plt.xlabel('Time (bins) – information flows from')
-plt.ylabel('Time (bins) - information flows to')
+plt.imshow(mask, cmap="gray", aspect="auto")
+plt.xlabel("Time (bins) – information flows from")
+plt.ylabel("Time (bins) - information flows to")
 plt.title("Example causal mask: black = allowed, white = masked out")
 
 # %% [markdown]
@@ -1300,19 +1597,21 @@ To leverage the causal mask, we simply need to pass it to the transformer layers
 # Instance of a transformer encoder layer
 layer = nn.TransformerEncoderLayer(...)
 # Our mask, as above.
-mask = torch.tril(torch.ones((50, 50), dtype=torch.bool))
+mask = ~torch.tril(torch.ones(50, 50, dtype=torch.bool))
 # When we forward an input to our layer, we pass along the mask so information only flows between the desired tokens.
 layer(x, mask=mask)
 ```
 
 We had already set up a parameter in the forward function in the `TransformerAutoencoder` implementation to make this easy. We can simply pass the mask to the `forward` method of the transformer, and it will take care of applying it to all transformer layers.
 
-Now let's implement the causal transformer decoder. We'll use the same architecture as before, but we'll add a causal mask to the transformer layers. This will ensure that the model only uses information from the past to predict the future.
+Now let's implement the causal transformer decoder. We'll use the same architecture as before, but we'll add a causal mask to the transformer layers. 
 """
+
+
 # %%
 class CausalTransformerWithDecoder(TransformerWithDecoder):
     """Combines pretrained PM Transformer with behavior decoder."""
-    
+
     def __init__(
         self,
         transformer: nn.Module,
@@ -1329,18 +1628,25 @@ class CausalTransformerWithDecoder(TransformerWithDecoder):
             Tuple of (reconstructed spikes, decoded behavior)
         """
         # Generate a causal mask
-        mask = ~torch.tril(torch.ones((x.shape[1], x.shape[1]), dtype=torch.bool)).to(x.device)
+        mask = ~torch.tril(torch.ones((x.shape[1], x.shape[1]), dtype=torch.bool)).to(
+            x.device
+        )
         # Get internal representations
         _, h = self.transformer.forward(x=x, return_latents=True, mask=mask)
-            
+
         # Decode behavior from representations
         behavior = self.decoder(h)
-        
+
         return behavior
 
+# %%
+"""
+Now we're ready to train the causal transformer decoder. We'll use the same training loop as before, but this time we'll pass the causal mask to the transformer layers. We *could* start by pretraining the model on the `mc_maze` dataset with the causal mask, but since we already have a pretrained model, we'll just adapt it to the new dataset and train the causal decoder on top of it. This turns out to be highly effective.
+"""
+# %%
 # Load the pretrained model
 net = TransformerAutoencoder(
-    input_dim=dataset['train_data'].shape[2],
+    input_dim=dataset["train_data"].shape[2],
     hidden_dim=256,
     num_layers=6,
     num_heads=2,
@@ -1349,14 +1655,13 @@ net = TransformerAutoencoder(
     max_seq_len=70,
 )
 
-# Here's the tricky part: we'll overwrite the input and output projection layers to match the new number of neurons
 torch.serialization.add_safe_globals([argparse.Namespace])
 pretrained_model_path = "scripts/mc_maze_tuned.pt"  # Adjust this path
 ckpt = torch.load(pretrained_model_path, map_location=device)
-state_dict = ckpt['model_state_dict']
-state_dict['input_projection.weight'] = net.input_projection.weight.data.detach()
-state_dict['output_projection.weight'] = net.output_projection.weight.data.detach()
-state_dict['output_projection.bias'] = net.output_projection.bias.data.detach()
+state_dict = ckpt["model_state_dict"]
+state_dict["input_projection.weight"] = net.input_projection.weight.data.detach()
+state_dict["output_projection.weight"] = net.output_projection.weight.data.detach()
+state_dict["output_projection.bias"] = net.output_projection.bias.data.detach()
 net.load_state_dict(state_dict, strict=True)
 
 batch_size = 64
@@ -1365,10 +1670,10 @@ epochs = 500  # Number of epochs to train
 
 net = net.to(device)
 causal_model = CausalTransformerWithDecoder(
-        transformer=net,
-        behavior_dim=dataset['train_behavior'].shape[2],
-        freeze_transformer=False,  # Unfreeze the transformer encoder
-    ).to(device)
+    transformer=net,
+    behavior_dim=dataset["train_behavior"].shape[2],
+    freeze_transformer=False,  # Unfreeze the transformer encoder
+).to(device)
 causal_model, val_r2 = finetune_bci_decoder(
     model=causal_model,
     dataset=dataset,
@@ -1383,17 +1688,27 @@ Now we've successfully implemented a causal transformer decoder. This allows us 
 """
 # %%
 sample_idx = 1
-spikes = torch.from_numpy(dataset['train_data'][sample_idx:sample_idx+1, :, :]).to(device).float()
+spikes = (
+    torch.from_numpy(dataset["train_data"][sample_idx : sample_idx + 1, :, :])
+    .to(device)
+    .float()
+)
 # Now create a perturbed version of spikes, where there's some noise in the second half of the trial..
 spikes_perturbed = spikes.clone()
-spikes_perturbed[:, spikes.shape[1] // 2:, :] += (torch.rand_like(spikes[:, spikes.shape[1] // 2:, :]) * 3).int().float()
+spikes_perturbed[:, spikes.shape[1] // 2 :, :] += (
+    (torch.rand_like(spikes[:, spikes.shape[1] // 2 :, :]) * 3).int().float()
+)
 
 causal_model.eval()
 model.eval()
 
-behavior = torch.from_numpy(dataset['train_behavior'][sample_idx:sample_idx+1, :, :]).to(device).float()
+behavior = (
+    torch.from_numpy(dataset["train_behavior"][sample_idx : sample_idx + 1, :, :])
+    .to(device)
+    .float()
+)
 
-#predicted_behavior = model(spikes)
+# predicted_behavior = model(spikes)
 predicted_behavior_causal = causal_model(spikes)
 predicted_behavior_acausal = model(spikes)
 predicted_behavior_causal_perturbed = causal_model(spikes_perturbed)
@@ -1403,38 +1718,67 @@ predicted_behavior_acausal_perturbed = model(spikes_perturbed)
 rg = np.arange(spikes.shape[1]) * bin_size
 plt.figure(figsize=(6, 8))
 plt.subplot(5, 1, 1)
-plt.plot(rg, behavior[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.plot(
+    rg, behavior[0, :, :].detach().cpu().numpy(), label="Causal predicted behavior (x)"
+)
 plt.box(False)
 plt.title("True behavior")
 
 plt.subplot(5, 1, 2)
-plt.plot(rg, predicted_behavior_causal[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.plot(
+    rg,
+    predicted_behavior_causal[0, :, :].detach().cpu().numpy(),
+    label="Causal predicted behavior (x)",
+)
 plt.box(False)
 plt.title("Causally decoded behavior (clean)")
 
 plt.subplot(5, 1, 3)
-plt.plot(rg, predicted_behavior_acausal[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
+plt.plot(
+    rg,
+    predicted_behavior_acausal[0, :, :].detach().cpu().numpy(),
+    label="Causal predicted behavior (x)",
+)
 plt.box(False)
 plt.title("Acausally decoded behavior (clean)")
 
 plt.subplot(5, 1, 4)
-plt.plot(rg, predicted_behavior_causal_perturbed[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
-plt.axvline(x=spikes.shape[1] // 2 * bin_size, color='r', linestyle='--', label='Perturbation point')
+plt.plot(
+    rg,
+    predicted_behavior_causal_perturbed[0, :, :].detach().cpu().numpy(),
+    label="Causal predicted behavior (x)",
+)
+plt.axvline(
+    x=spikes.shape[1] // 2 * bin_size,
+    color="r",
+    linestyle="--",
+    label="Perturbation point",
+)
 plt.box(False)
 plt.title("Causally decoded behavior (perturbed)")
 
 plt.subplot(5, 1, 5)
-plt.plot(rg, predicted_behavior_acausal_perturbed[0, :, :].detach().cpu().numpy(), label='Causal predicted behavior (x)')
-plt.axvline(x=spikes.shape[1] // 2 * bin_size, color='r', linestyle='--', label='Perturbation point')
+plt.plot(
+    rg,
+    predicted_behavior_acausal_perturbed[0, :, :].detach().cpu().numpy(),
+    label="Causal predicted behavior (x)",
+)
+plt.axvline(
+    x=spikes.shape[1] // 2 * bin_size,
+    color="r",
+    linestyle="--",
+    label="Perturbation point",
+)
 plt.box(False)
 plt.title("Acausally decoded behavior (perturbed)")
-plt.xlabel('Time (s)')
-plt.ylabel('Velocity (m/s)')
+plt.xlabel("Time (s)")
+plt.ylabel("Velocity (m/s)")
 plt.tight_layout()
 
-
-# %%
+# %% [markdown]
 """
+Notice that the causal decoder's output is only affected in the second half of the trial, after the perturbation, whereas the acausal decoder is affected everywhere. We've thus successfully implemented a causal transformer decoder that can be used for online BCI decoding. This allows us to use the model in real-time applications, where we can only use spikes that have happened thus far to predict behavior.
+
 # Conclusion
 
 In this tutorial, we've covered the following topics:
@@ -1456,27 +1800,26 @@ So how can you take this to the next level? The literature is rife with ideas fo
 When you're ready to take that leap, check out the tutorial from Eva Dyer's group on [Foundation Models for Neuroscience](https://colab.research.google.com/github/evadyer/foundation_models_for_neuroscience/blob/main/01_foundation_models_for_neuroscience.ipynb). It covers many of these ideas in more detail, and provides a great starting point for your own research.
 Here are a few other relevant references:
 
-* https://cosyne-tutorial-2025.github.io/
-* 
-* 
+* [Cosyne tutorial](https://cosyne-tutorial-2025.github.io/)
+* [Blog post](https://www.neuroai.science/p/foundation-models-for-neuroscience)
 """
-#%%[markdown]
+# %%[markdown]
 """
 TODO:
 
 * ~~Rename the models in the table with the r2~~
 * ~~Show how to use the causal decoder for online BCI decoding~~
-* Explain circshift collation
+* ~~Explain circshift collation~~
 * ~~remove the r2 stuff~~
 * ~~Move all of the import upwards~~
-* Make the code less repetitive
-* Hide code that is not relevant
-* Add in diagrams to demonstrate how the model works
+* ~~Make the code less repetitive~~
+* ~~Hide code that is not relevant~~
+* ~~Add in diagrams to demonstrate how the model works~~
+* ~~Upload the preprocessed datasets somewhere~~
+* ~~Clean up the repo, remove a lot of the boilerplate code~~
+* ~~Clean up the code~~
+* Transform into a colab
 * Add in references to the relevant literature
 * Turn this into relevant exercises
 * Ask Claude several times how to make this better
-* Transform into a colab
-* Upload the preprocessed datasets somewhere
-* Clean up the repo, remove a lot of the boilerplate code
-* Clean up the code
 """
