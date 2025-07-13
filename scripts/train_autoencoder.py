@@ -31,6 +31,8 @@ import wandb
 import matplotlib.pyplot as plt
 import matplotlib
 
+from src.data import load_dataset
+
 matplotlib.use('Agg')  # Use non-interactive backend
 
     
@@ -229,7 +231,7 @@ def evaluate(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train masked Transformer autoencoder on spike data.")
-    p.add_argument("--dataset", default="lorenz", choices=["lorenz", *_DATASET_MAP.keys()], help="Dataset name.")
+    p.add_argument("--dataset", default="lorenz", choices=["lorenz", "mc_maze", "mc_maze_high", "mc_maze_medium", "mc_maze_small"], help="Dataset name.")
     p.add_argument("--data-root", default="data/h5", help="Path containing dataset files.")
     p.add_argument("--pos-encoding", default="sin", help="Positional encoding.")
     p.add_argument("--hidden-dim", type=int, default=32, help="Inner channel size for Transformer layers.")
@@ -246,7 +248,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--context-backward", type=int, default=10, help="Backward context length for Transformer (-1 = full context, 1+ = partial).")
     p.add_argument("--logdir", default="runs", help="TensorBoard log directory.")
     p.add_argument("--checkpoint", default="checkpoint.pt", help="File to save best model (by val NLL).")
-    p.add_argument("--model-type", default="pm", choices=["pm", "ndt", "unet"], help="Model type to use.")
+    p.add_argument("--model-type", default="rendt", choices=["rendt", "ndt", "unet"], help="Model type to use.")
     p.add_argument("--use-wandb", action="store_true", help="Enable Weights & Biases logging.")
     p.add_argument("--wandb-project", default="neural-autoencoder", help="W&B project name.")
     p.add_argument("--wandb-entity", default=None, help="W&B entity/team name.")
@@ -314,7 +316,7 @@ def main() -> None:
     trial_len = train_data.shape[1]
 
     if args.model_type == "rendt":
-        from ndt_reimplementation import instantiate_autoencoder
+        from src.ndt_reimplementation import instantiate_autoencoder
         net = instantiate_autoencoder(args, n_neurons, trial_len).to(device)
     elif args.model_type == "unet":
         from src import unet
@@ -325,8 +327,10 @@ def main() -> None:
             upsample=unet.UpsampleMethod.LINEAR
         ).to(device)
     elif args.model_type == "ndt":
-        from ndt_transformer import instantiate_autoencoder
+        from src.ndt_transformer import instantiate_autoencoder
         net = instantiate_autoencoder(args, n_neurons, trial_len, device).to(device)
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
     
 
     # Calculate model parameters
@@ -383,7 +387,7 @@ def main() -> None:
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
 
     #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.epochs // 2, gamma=0.3)
-    from optim import WarmupCosineSchedule
+    from src.optim import WarmupCosineSchedule
 
     scheduler = WarmupCosineSchedule(
         optimizer,

@@ -111,19 +111,20 @@ else:
 
 #%% {"cellView": "form"}
 #@title Visualization functions
+cmap = "viridis"
 def visualize_trial_data(trial_data, trial_truth, bin_size=0.01):
     """
     Helper function to plot the trial data and truth."""
     fig, axes = plt.subplots(
         nrows=2,
         ncols=1,  # two rows, one column
-        figsize=(4, 6),  # any size you like
+        figsize=(4, 5),  # any size you like
         sharex=False,  # optional: share the x-axis
     )
 
     axes[0].imshow(
         trial_data.T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -137,7 +138,7 @@ def visualize_trial_data(trial_data, trial_truth, bin_size=0.01):
 
     axes[1].imshow(
         dataset["val_truth"][0, :, :].T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -155,14 +156,14 @@ def visualize_trial_data(trial_data, trial_truth, bin_size=0.01):
 def visualize_masking(data, masked_data, mask):
     """Visualize the masking function."""
     # Create 4-panel visualization
-    fig, axes = plt.subplots(3, 1, figsize=(4, 6))
+    fig, axes = plt.subplots(3, 1, figsize=(4, 7))
 
     # Since we have a single sequence, we'll plot as line plots for clarity
     time_axis = np.arange(original_data.shape[1])
 
     axes[0].imshow(
         original_data.squeeze().numpy().T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -176,7 +177,16 @@ def visualize_masking(data, masked_data, mask):
     axes[0].set_ylabel("Spike Value")
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].imshow(torch.tile(mask, [n_neurons, 1]).squeeze(), cmap="gray")
+    axes[1].imshow(torch.tile(mask, 
+                              [n_neurons, 1]).squeeze(), 
+                              cmap="gray", 
+                              aspect="auto", 
+                              extent=[
+            0,
+            data.shape[1] * bin_size,
+            0,
+            data.shape[2],
+        ])
     axes[1].set_title("Mask (white = masked positions)", fontsize=14, fontweight="bold")
     axes[1].set_xlabel("Time Steps")
     axes[1].set_ylabel("Mask Value")
@@ -184,7 +194,7 @@ def visualize_masking(data, masked_data, mask):
 
     axes[2].imshow(
         masked_data.squeeze().T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -204,11 +214,11 @@ def visualize_masking(data, masked_data, mask):
 def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates):
     """Visualize the model's predictions against the true rates."""
     n_batch, nt, n_neurons = example_batch.shape
-    plt.figure(figsize=(4, 12))
+    plt.figure(figsize=(4, 7))
     plt.subplot(3, 1, 1)
     plt.imshow(
         example_batch[0].detach().cpu().numpy().T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -221,7 +231,7 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
     plt.subplot(3, 1, 2)
     plt.imshow(
         true_rates[0].detach().cpu().numpy().T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -234,7 +244,7 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
     plt.subplot(3, 1, 3)
     plt.imshow(
         estimated_spike_rates.T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -243,7 +253,9 @@ def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_r
             n_neurons,
         ],
     )
+    plt.xlabel("Time (s)")
     plt.title("Model prediction")
+    plt.tight_layout()
     plt.show()
 
 def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
@@ -292,7 +304,7 @@ def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
 
     ax_bottom[0].imshow(
         trial_spikes.T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -307,7 +319,7 @@ def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
 
     ax_bottom[1].imshow(
         trial_truth.T,
-        cmap="gray_r",
+        cmap=cmap,
         aspect="auto",
         extent=[
             0,
@@ -320,6 +332,28 @@ def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
     ax_bottom[1].set_ylabel("Neuron #")
     ax_bottom[1].set_title("Ground truth (smoothed data)")
 
+    plt.tight_layout()
+
+def visualize_singular_values(Si, So, Vi, Uo):
+    plt.figure(figsize=(8, 8))
+    plt.subplot(2, 2, 1)
+    plt.plot(Si, "o-", label="Input embedding singular values")
+    plt.xlabel("Singular value index")
+    plt.title("Input embedding singular values")
+    plt.subplot(2, 2, 2)
+    plt.plot(So, "o-", label="Output readout singular values")
+    plt.xlabel("Singular value index")
+    plt.title("Output readout singular values")
+    plt.subplot(2, 2, 3)
+    plt.plot(rectify(Vi[:3, :].T))
+    plt.xlabel("Neuron #")
+    plt.ylabel("Loading")
+    plt.title("Top 3 input projection singular vectors")
+    plt.subplot(2, 2, 4)
+    plt.plot(rectify(Uo[:, :3]))
+    plt.xlabel("Neuron #")
+    plt.ylabel("Loading")
+    plt.title("Top 3 output projection singular vectors")
     plt.tight_layout()
 
 #%% {"cellView": "form"}
@@ -497,7 +531,7 @@ Aside from the all-important transformer encoder layers, this model has a positi
 The positional encoding is initialized in the __init__ constructor:
 
 ```
-self.pos_embedding = nn.Parameter(torch.zeros(max_seq_len, input_dim))
+self.pos_embedding = nn.Parameter(torch.randn(max_seq_len, input_dim))
 ```
 
 It's directly added to the input tokens in the forward pass:
@@ -598,43 +632,11 @@ Notice that:
 * We only use the masked tokens to compute the loss
 * We use the Poisson negative log-likelihood loss, which is appropriate for spike data
 
-## Augmentation
-
-It's coming to augment data in deep learning pipelines: for example, we might include random shifts and zooms in images to make the model more robust to small perturbations. In the case of spike data, we can use a similar idea: we can randomly shift the time series data by a small amount, and then train the model to predict the shifted data. We'll do the shifting in the collate function, which is called when we create batches of data. This will allow us to shift the data randomly for each batch, and make the model more robust to small shifts in the data.
-"""
-# %% 
-def circshift_collate_fn(batch, delta=1):
-    def fun(batch):
-        """Vectorized version for better performance"""
-        data_list, truth_list = zip(*batch)
-
-        data = torch.stack(data_list)
-        truth = torch.stack(truth_list)
-
-        batch_size = data.size(0)
-        seq_len = data.size(1)
-
-        # Generate random shifts for each sample
-        shifts = torch.randint(-delta, delta + 1, (batch_size,))
-
-        # Apply shifts using advanced indexing
-        indices = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
-        shifted_indices = (indices - shifts.unsqueeze(1)) % seq_len
-
-        # Apply the shifts
-        data = data.gather(
-            1, shifted_indices.unsqueeze(-1).expand(-1, -1, data.size(-1))
-        )
-        return data, truth
-
-    return fun
-# %% [markdown]
-"""
 ## Putting it all together and training the model
 
 With that, we're ready to learn a model that can take in the masked data and predict the unmasked tokens. We're going to create our basic training loop, which should look familiar by now:
 
-* Load the data (including the circshift augmentation)
+* Load the data
 * Create the model
 * Create the loss function
 * Create the optimizer
@@ -735,7 +737,6 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
         batch_size=batch_size,
         shuffle=True,
         drop_last=False,
-        collate_fn=circshift_collate_fn(3),
     )
     val_loader = DataLoader(
         TensorDataset(val_data, val_truth), batch_size=batch_size, shuffle=False
@@ -750,7 +751,7 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
         t_total=epochs,
     )
 
-    best_val_loss = float("inf")
+    best_val_r2 = float("-inf")
 
     for epoch in tqdm(range(1, epochs + 1), desc="Training", unit="epoch"):
 
@@ -771,8 +772,8 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
                 f"Epoch {epoch:03d} | train NLL {train_loss:.4f} | val NLL {val_loss:.4f} | val R² {val_r2:.4f}"
             )
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_r2 > best_val_r2:
+                best_val_r2 = val_r2
                 best_model = {
                     k: v.cpu().detach().clone() for k, v in net.state_dict().items()
                 }
@@ -780,10 +781,10 @@ def train_network(net, data, batch_size, lr, epochs, mask_ratio):
         scheduler.step()
 
     # At the end, load the model with the best validation loss
-    tqdm.write(f"Best validation loss: {best_val_loss:.4f}")
+    tqdm.write(f"Best validation R^2: {best_val_r2:.4f}")
     tqdm.write("Loading best model state dict")
     net.load_state_dict(best_model)
-    return net
+    return net, best_val_r2
 
 
 net = SimpleTransformerAutoencoder(
@@ -861,7 +862,7 @@ class TransformerAutoencoder(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
 
-        self.pos_embedding = nn.Parameter(torch.zeros(max_seq_len, hidden_dim))
+        self.pos_embedding = nn.Parameter(torch.randn(max_seq_len, hidden_dim))
 
         # Transformer encoder layers
         def create_encoder_layer() -> nn.TransformerEncoderLayer:
@@ -938,23 +939,23 @@ Notice the key differences from the previous model:
 Let's train this model on the same data as before, and see how it performs.
 """
 # %% 
-
-net = TransformerAutoencoder(
-    input_dim=n_neurons,
-    hidden_dim=128,
-    num_layers=4,
-    num_heads=1,
-    ffn_dim=128,
-    dropout=0.7,
-    max_seq_len=50,
-)
 batch_size = 64
 lr = 2e-3  # Learning rate
 epochs = 100  # Number of epochs to train
 mask_ratio = 0.25
 
 # Train the network
-train_network(
+
+net = TransformerAutoencoder(
+    input_dim=n_neurons,
+    hidden_dim=256,
+    num_layers=4,
+    num_heads=1,
+    ffn_dim=256,
+    dropout=0.7,
+    max_seq_len=50,
+)
+net, val_r2 = train_network(
     net, dataset, batch_size=batch_size, lr=lr, epochs=epochs, mask_ratio=mask_ratio
 )
 
@@ -987,28 +988,6 @@ That looks much better. An advantage of doing the autoencoding in latent space i
 Does the latent space encode something interesting about the dynamical system that generated this data? Transformers have a reputation as black boxes, but nothing prevents us from looking at what's inside the models to learn about how they operate. We can verify this by looking at the weights of the model. Let's use PCA to determine the measure the top PCs of the input and output projection matrices.
 """
 # %%
-def display_singular_values(Si, So, Vi, Uo):
-    plt.figure(figsize=(8, 8))
-    plt.subplot(2, 2, 1)
-    plt.plot(Si, "o-", label="Input embedding singular values")
-    plt.xlabel("Singular value index")
-    plt.title("Input embedding singular values")
-    plt.subplot(2, 2, 2)
-    plt.plot(So, "o-", label="Output readout singular values")
-    plt.xlabel("Singular value index")
-    plt.title("Output readout singular values")
-    plt.subplot(2, 2, 3)
-    plt.plot(rectify(Vi[:3, :].T))
-    plt.xlabel("Neuron #")
-    plt.ylabel("Loading")
-    plt.title("Top 3 input projection singular vectors")
-    plt.subplot(2, 2, 4)
-    plt.plot(rectify(Uo[:, :3]))
-    plt.xlabel("Neuron #")
-    plt.ylabel("Loading")
-    plt.title("Top 3 output projection singular vectors")
-    plt.tight_layout()
-
 Wi = net.input_projection.weight.detach().cpu().numpy()
 Wo = net.output_projection.weight.detach().cpu().numpy()
 
@@ -1020,7 +999,7 @@ def rectify(x):
     """Rectify a matrix by setting negative values to zero."""
     return x * np.sign(x.mean(axis=0, keepdims=True))
 
-display_singular_values(Si, So, Vi, Uo)
+visualize_singular_values(Si, So, Vi, Uo)
 
 # %% [markdown]
 """
@@ -1070,7 +1049,7 @@ net = TransformerAutoencoder(
     hidden_dim=256,
     num_layers=6,
     num_heads=2,
-    ffn_dim=128,
+    ffn_dim=256,
     dropout=0.7,
     max_seq_len=70,
 )
@@ -1117,6 +1096,9 @@ class TransformerWithDecoder(nn.Module):
         """Freeze or unfreeze transformer parameters."""
         for param in self.transformer.parameters():
             param.requires_grad = not freeze
+
+        # Don't freeze the input projection layer
+        self.transformer.input_projection.weight.requires_grad = True
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
