@@ -6,7 +6,9 @@ Implements an NDT-1 style encoder from scratch (Ye and Pandarinath, 2021).
 
 ## Running the tutorial in colab (recommended)
 
-![Click this link](https://colab.research.google.com/github/patrickmineault/fmn-tutorial/blob/main/tutorials/Tutorial.ipynb)
+<a target="_blank" href="https://colab.research.google.com/github/patrickmineault/fmn-tutorial/blob/main/tutorials/Tutorial.ipynb">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
+</a>
 
 ## Compiling the tutorial from the .py source
 

@@ -23,7 +23,7 @@ NDT-1 is a self-supervised model that learns representations through a masked au
 ```
 The cat sat on the [MASK].
                       |
-                    mat
+                     mat
 ```
 
 A large-language model like BERT is trained, on millions of sentences, to predict masked words like `[MASK]` from the surrounding context. The model learns to predict the masked word, and in doing so, learns a representation of the sentence that captures the meaning of the words in context. NDT-1 uses an adaptation of the same masked autoencoding task, but with spike data. 
@@ -1807,23 +1807,12 @@ Here are a few other relevant references:
 * [Cosyne tutorial](https://cosyne-tutorial-2025.github.io/)
 * [Blog post](https://www.neuroai.science/p/foundation-models-for-neuroscience)
 """
-# %%[markdown]
+# %% [markdown]
 """
 TODO:
 
-* ~~Rename the models in the table with the r2~~
-* ~~Show how to use the causal decoder for online BCI decoding~~
-* ~~Explain circshift collation~~
-* ~~remove the r2 stuff~~
-* ~~Move all of the import upwards~~
-* ~~Make the code less repetitive~~
-* ~~Hide code that is not relevant~~
-* ~~Add in diagrams to demonstrate how the model works~~
-* ~~Upload the preprocessed datasets somewhere~~
-* ~~Clean up the repo, remove a lot of the boilerplate code~~
-* ~~Clean up the code~~
-* Transform into a colab
-* Add in references to the relevant literature
-* Turn this into relevant exercises
+* Add more references to the relevant literature
+* Check in on whether transformers will be explained by the time I give my lecture
+* Turn into more active exercises
 * Ask Claude several times how to make this better
 """
