@@ -1638,7 +1638,7 @@ class CausalTransformerWithDecoder(TransformerWithDecoder):
 
         return behavior
 
-# %%
+# %% [markdown]
 """
 Now we're ready to train the causal transformer decoder. We'll use the same training loop as before, but this time we'll pass the causal mask to the transformer layers. We *could* start by pretraining the model on the `mc_maze` dataset with the causal mask, but since we already have a pretrained model, we'll just adapt it to the new dataset and train the causal decoder on top of it. This turns out to be highly effective.
 """
