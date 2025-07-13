@@ -111,7 +111,7 @@ else:
 
 #%% {"cellView": "form"}
 #@title Visualization functions
-def plot_trial_data(trial_data, trial_truth, bin_size=0.01):
+def visualize_trial_data(trial_data, trial_truth, bin_size=0.01):
     """
     Helper function to plot the trial data and truth."""
     fig, axes = plt.subplots(
@@ -154,11 +154,8 @@ def plot_trial_data(trial_data, trial_truth, bin_size=0.01):
 
 def visualize_masking(data, masked_data, mask):
     """Visualize the masking function."""
-    
-    fig, axes = plt.subplots(2, 1, figsize=(8, 6))
-
     # Create 4-panel visualization
-    fig, axes = plt.subplots(3, 1, figsize=(8, 8))
+    fig, axes = plt.subplots(3, 1, figsize=(4, 6))
 
     # Since we have a single sequence, we'll plot as line plots for clarity
     time_axis = np.arange(original_data.shape[1])
@@ -203,6 +200,127 @@ def visualize_masking(data, masked_data, mask):
 
     plt.tight_layout()
     plt.show()
+
+def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates):
+    """Visualize the model's predictions against the true rates."""
+    n_batch, nt, n_neurons = example_batch.shape
+    plt.figure(figsize=(4, 12))
+    plt.subplot(3, 1, 1)
+    plt.imshow(
+        example_batch[0].detach().cpu().numpy().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    plt.title("Input spikes")
+    plt.subplot(3, 1, 2)
+    plt.imshow(
+        true_rates[0].detach().cpu().numpy().T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    plt.title("Ground truth latents")
+    plt.subplot(3, 1, 3)
+    plt.imshow(
+        estimated_spike_rates.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    plt.title("Model prediction")
+    plt.show()
+
+def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
+    """Visualize a single trial of the mc_maze dataset."""
+    # One figure, two axes stacked vertically
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        nrows=2,
+        ncols=2,  # two rows, one column
+        gridspec_kw={
+            "height_ratios": [1, 2],
+            "width_ratios": [1, 1],
+        },  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
+        figsize=(6, 8),  # any size you like
+        sharex=False,  # optional: share the x-axis
+    )
+
+    nt, n_neurons = trial_spikes.shape[0], trial_spikes.shape[1]
+
+    bin_size = 0.01
+
+    ax_top[0].plot(
+        np.arange(nt) * bin_size,
+        trial_behavior,
+    )
+    ax_top[0].legend(["Velocity (x)", "Velocity (y)"])
+    ax_top[0].set_xlim(0, nt * bin_size)
+    ax_top[0].set_ylim(-1, 1)
+    ax_top[0].set_xlabel("Time (s)")
+    ax_top[0].set_ylabel("Velocity (m/s)")
+
+    ax_top[1].plot(
+        bin_size * np.cumsum(trial_behavior[:, 0]),
+        bin_size * np.cumsum(trial_behavior[:, 1]),
+        "-.",
+    )
+    ax_top[1].set_xlabel("x position (m)")
+    ax_top[1].set_ylabel("y position (m)")
+    ax_top[1].set_xlim([-0.2, 0.2])
+    ax_top[1].set_ylim([-0.2, 0.2])
+    ax_top[1].plot(
+        np.cumsum(trial_behavior[:, 0])[-1],
+        np.cumsum(trial_behavior[:, 1])[-1],
+        "gx",
+    )  # mark the end
+    ax_top[1].plot(0, 0, "ro")
+
+    ax_bottom[0].imshow(
+        trial_spikes.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    ax_bottom[0].set_xlabel("Time (s)")
+    ax_bottom[0].set_ylabel("Neuron #")
+    ax_bottom[0].set_title("Spikes")
+
+    ax_bottom[1].imshow(
+        trial_truth.T,
+        cmap="gray_r",
+        aspect="auto",
+        extent=[
+            0,
+            nt * bin_size,
+            0,
+            n_neurons,
+        ],
+    )
+    ax_bottom[1].set_xlabel("Time (s)")
+    ax_bottom[1].set_ylabel("Neuron #")
+    ax_bottom[1].set_title("Ground truth (smoothed data)")
+
+    plt.tight_layout()
 
 #%% {"cellView": "form"}
 #@title Utility functions
@@ -269,7 +387,7 @@ These are the important keys:
 Now let's look at the data for a single trial:
 """
 # %%
-plot_trial_data(dataset["val_data"][0], dataset["val_truth"][0], bin_size = 0.01)
+visualize_trial_data(dataset["val_data"][0], dataset["val_truth"][0], bin_size = 0.01)
 
 # %% [markdown]
 """
@@ -693,52 +811,6 @@ The training converged! We can see that the validation loss is decreasing, and t
 Let's visualize the results on some sample data. We'll take a single validation trial and see how the network embeds the data. You'll note that we don't mask the data in this case: we just take the raw data and look at how the auto-encoder treats it.
 """
 # %%
-# Which trial to visualize?
-def visualize_estimated_spike_rates(example_batch, true_rates, estimated_spike_rates):
-    """Visualize the model's predictions against the true rates."""
-    n_batch, nt, n_neurons = example_batch.shape
-    plt.figure(figsize=(4, 12))
-    plt.subplot(3, 1, 1)
-    plt.imshow(
-        example_batch[0].detach().cpu().numpy().T,
-        cmap="gray_r",
-        aspect="auto",
-        extent=[
-            0,
-            nt * bin_size,
-            0,
-            n_neurons,
-        ],
-    )
-    plt.title("Input spikes")
-    plt.subplot(3, 1, 2)
-    plt.imshow(
-        true_rates[0].detach().cpu().numpy().T,
-        cmap="gray_r",
-        aspect="auto",
-        extent=[
-            0,
-            nt * bin_size,
-            0,
-            n_neurons,
-        ],
-    )
-    plt.title("Ground truth latents")
-    plt.subplot(3, 1, 3)
-    plt.imshow(
-        estimated_spike_rates.T,
-        cmap="gray_r",
-        aspect="auto",
-        extent=[
-            0,
-            nt * bin_size,
-            0,
-            n_neurons,
-        ],
-    )
-    plt.title("Model prediction")
-    plt.show()
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 visualize_index = 2
 net.eval()
@@ -886,10 +958,10 @@ train_network(
     net, dataset, batch_size=batch_size, lr=lr, epochs=epochs, mask_ratio=mask_ratio
 )
 
-# %% 
+# %% [markdown]
 """
-Training converged, and the R^2 looks much better than before! Let's visualize the results on some sample data, as we did before."""
-
+Training converged, and the R^2 looks much better than before! Let's visualize the results on some sample data, as we did before.
+"""
 # %%
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -980,82 +1052,6 @@ Let's start by visualizing this data.
 
 dataset = load_dataset("mc_maze_medium")
 
-def visualize_mc_maze_data(trial_spikes, trial_truth, trial_behavior):
-    """Visualize a single trial of the mc_maze dataset."""
-    # One figure, two axes stacked vertically
-    fig, (ax_top, ax_bottom) = plt.subplots(
-        nrows=2,
-        ncols=2,  # two rows, one column
-        gridspec_kw={
-            "height_ratios": [1, 2],
-            "width_ratios": [1, 1],
-        },  # 1 : 2  ⇒ top = ⅓, bottom = ⅔
-        figsize=(6, 8),  # any size you like
-        sharex=False,  # optional: share the x-axis
-    )
-
-    nt, n_neurons = trial_spikes.shape[0], trial_spikes.shape[1]
-
-    bin_size = 0.01
-
-    ax_top[0].plot(
-        np.arange(nt) * bin_size,
-        trial_behavior,
-    )
-    ax_top[0].legend(["Velocity (x)", "Velocity (y)"])
-    ax_top[0].set_xlim(0, nt * bin_size)
-    ax_top[0].set_ylim(-1, 1)
-    ax_top[0].set_xlabel("Time (s)")
-    ax_top[0].set_ylabel("Velocity (m/s)")
-
-    ax_top[1].plot(
-        bin_size * np.cumsum(trial_behavior[:, 0]),
-        bin_size * np.cumsum(trial_behavior[:, 1]),
-        "-.",
-    )
-    ax_top[1].set_xlabel("x position (m)")
-    ax_top[1].set_ylabel("y position (m)")
-    ax_top[1].set_xlim([-0.2, 0.2])
-    ax_top[1].set_ylim([-0.2, 0.2])
-    ax_top[1].plot(
-        np.cumsum(trial_behavior[:, 0])[-1],
-        np.cumsum(trial_behavior[:, 1])[-1],
-        "gx",
-    )  # mark the end
-    ax_top[1].plot(0, 0, "ro")
-
-    ax_bottom[0].imshow(
-        trial_spikes.T,
-        cmap="gray_r",
-        aspect="auto",
-        extent=[
-            0,
-            nt * bin_size,
-            0,
-            n_neurons,
-        ],
-    )
-    ax_bottom[0].set_xlabel("Time (s)")
-    ax_bottom[0].set_ylabel("Neuron #")
-    ax_bottom[0].set_title("Spikes")
-
-    ax_bottom[1].imshow(
-        trial_truth.T,
-        cmap="gray_r",
-        aspect="auto",
-        extent=[
-            0,
-            nt * bin_size,
-            0,
-            n_neurons,
-        ],
-    )
-    ax_bottom[1].set_xlabel("Time (s)")
-    ax_bottom[1].set_ylabel("Neuron #")
-    ax_bottom[1].set_title("Ground truth (smoothed data)")
-
-    plt.tight_layout()
-
 trial_spikes = dataset["val_data"][0, :, :]  # First trial spikes
 trial_truth = dataset["val_truth"][0, :, :]
 trial_behavior = dataset["val_behavior"][0, :]  # First trial behavior
@@ -1099,9 +1095,7 @@ The key step is to use the latents from the masked autoencoder as input to the B
 
 Let's create a lightweight shim on top of the TransformerAutoencoder that allows us to train a BCI decoder on top of the latents. We'll use the simplest setup, where the sampling rate of the behavior is the same as the sampling rate of the spikes, and spikes and behavior are already aligned temporally. In that case, we can just use a linear layer to decode the behavior from the latents: one token = one timepoint = one behavioral sample. Note that you could use a more powerful decoder like another transformer, or use sophisticated mechanisms to handle different sampling rates than the spikes---see the references for details.
 """
-
-
-# %% [markdown]
+# %%
 class TransformerWithDecoder(nn.Module):
     """Combines pretrained PM Transformer with behavior decoder."""
 
@@ -1144,6 +1138,7 @@ class TransformerWithDecoder(nn.Module):
 """
 Now we're ready to train this. We set up another training loop. Note that this time, our criterion will be the MSE loss, since we're predicting continuous behavior values. We also use far more conservative dropout rate.
 """
+# %%
 def finetune_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -1532,7 +1527,7 @@ state_dict["output_projection.weight"] = net.output_projection.weight.data.detac
 state_dict["output_projection.bias"] = net.output_projection.bias.data.detach()
 net.load_state_dict(state_dict, strict=True)
 
-# %%
+# %% [markdown]
 """
 Now we're ready to train the model on the new dataset! The input and output projection layers will be trained as part of the fine-tuning process.
 """
@@ -1568,7 +1563,7 @@ Let's see all the scores of the different model variants we've tried on this dat
 
 pd.DataFrame(results).set_index("method").sort_values("best_val_r2", ascending=False)
 
-# %%
+# %% [markdown]
 """
 Where foundation models especially shine is when we have very large pretraining datasets, and very small fine-tuning datasets. You can try, for example, to finetune the `mc_maze` checkpoint on one half of the `mc_maze_small` dataset (only ~40 trials). You'll see that pretraining makes a big difference, and the model can achieve a much higher R² than training from scratch.
 """
@@ -1686,7 +1681,7 @@ causal_model, val_r2 = finetune_bci_decoder(
     epochs=epochs,
 )
 
-# %%
+# %% [markdown]
 """
 Now we've successfully implemented a causal transformer decoder. This allows us to use the model for online BCI decoding, where we can only use spikes that have happened thus far to predict behavior. Let's verify that the model behaves as expected. We'll do this by passing in a sequence of spikes and checking that the model only uses information from the past to predict the future.
 """
