@@ -12,7 +12,7 @@ We will train an NDT-1-stitch style model from scratch. NDT-1 (neural data trans
 
 It takes in spike data and recovers spike rates. 
 
-![NDT-1 action](image/ndt_action.png)
+![NDT-1 action](images/ndt_action.png)
 
 At the heart of NDT-1 is a transformer that reads in spike data, and outputs a denoised version of the spike data. 
 
