@@ -19,27 +19,27 @@ from typing import List, Optional, Tuple
 def parse_cells(content: str) -> List[Tuple[Optional[str], str]]:
     """Parse the content into cells based on # %% markers.
 
+    Handles both # %% exercise and # %% [exercise] formats.
+
     Returns list of (cell_type, cell_content) tuples.
     """
     # Split by cell markers, keeping the markers
-    cell_pattern = r"(# %%(?:\s+\w+)?.*?\n)"
-    parts = re.split(cell_pattern, content)
+    # Matches # %% followed by anything until newline
+    cell_pattern = r"(# %%.*?\n)"
+    parts = re.split(cell_pattern, content.strip())
 
     cells = []
-    i = 0
-
-    # Handle potential content before first cell marker
-    if parts[0].strip() and not parts[0].startswith("# %%"):
-        cells.append((None, parts[0]))
-        i = 1
+    i = 1
 
     # Process the rest
     while i < len(parts) - 1:
         marker = parts[i]
         content = parts[i + 1] if i + 1 < len(parts) else ""
 
-        # Extract cell type from marker
-        cell_type_match = re.match(r"# %%\s*(\w+)?", marker)
+        # print(content)
+
+        # Extract cell type from marker (handles both "exercise" and "[exercise]" formats)
+        cell_type_match = re.match(r"# %%\s*\[?(\w+)\]?", marker)
         if cell_type_match:
             cell_type = cell_type_match.group(1)
         else:
@@ -57,17 +57,14 @@ def create_student_version(cells: List[Tuple[Optional[str], str]]) -> str:
     skip_next_solution = False
 
     for i, (cell_type, content) in enumerate(cells):
-        if cell_type == "[exercise]":
+        if cell_type == "exercise":
             # Add the exercise cell
             output.append(content)
             skip_next_solution = True
-        elif cell_type == "[solution]":
+        elif cell_type == "solution":
             if skip_next_solution:
-                # Replace solution with a placeholder
-                output.append("# %% solution\n# TODO: Complete the exercise above\n")
                 skip_next_solution = False
             else:
-                # Standalone solution without preceding exercise
                 output.append(content)
         else:
             # Regular cell - include as is
@@ -78,8 +75,13 @@ def create_student_version(cells: List[Tuple[Optional[str], str]]) -> str:
 
 
 def create_solution_version(cells: List[Tuple[Optional[str], str]]) -> str:
-    """Create solution version with all cells included."""
-    return "".join(content for _, content in cells)
+    output = []
+
+    for i, (cell_type, content) in enumerate(cells):
+        if cell_type != "exercise":
+            # Add the cell, as long as it's not an exercise
+            output.append(content)
+    return "".join(output)
 
 
 def process_file(input_path: Path) -> None:

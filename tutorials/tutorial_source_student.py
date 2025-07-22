@@ -633,21 +633,6 @@ masked_data, mask = do_masking(torch.tensor(
 ).to(torch.int32), expected_ratio)
 assert calculate_mask_ratio(mask) == pytest.approx(expected_ratio, abs=0.05), "Mask ratio is not as expected"
 
-# %% [solution]
-def calculate_mask_ratio(mask: torch.Tensor):
-    """Check that the mask has the expected ratio of masked tokens.
-    
-    You can do this by checking the proportion of `True` values in the mask tensor.
-    """
-    mask_ratio = mask.sum().item() / mask.numel()
-    return mask_ratio
-
-expected_ratio = 0.25
-masked_data, mask = do_masking(torch.tensor(
-    dataset["train_data"][:32, :, :]
-).to(torch.int32), expected_ratio)
-assert calculate_mask_ratio(mask) == pytest.approx(expected_ratio, abs=0.05), "Mask ratio is not as expected"
-
 # %% [markdown]
 """
 Great! We now have a masking function that can be used to create masked data for our pretext task.
@@ -686,42 +671,6 @@ loss = nn.PoissonNLLLoss(reduction="mean", log_input=True)
 torch.manual_seed(48)  # For reproducible results
 
 # Make fake data and predictions
-spike_log_rates = torch.randn(10, 100, 29)  # Dummy predictions
-spike_log_rates[:, :50, :] *= 0.1
-spikes = torch.poisson(torch.exp(spike_log_rates))  # Dummy ground truth
-mask = torch.ones(spikes.shape[0], spikes.shape[1], dtype=torch.bool)
-mask[:, :50] = False  # Mask out the first half time steps
-
-# Calculate the loss
-loss_value = calculate_poisson_nll_loss(loss, spike_log_rates, spikes, mask)
-# Check that the loss value is close to the expected value
-np.testing.assert_allclose(
-    loss_value.item(),
-    0.01461,
-    rtol=1e-3,
-)
-
-# %% [solution]
-def calculate_poisson_nll_loss(loss: nn.PoissonNLLLoss, predictions, spikes, mask) -> torch.Tensor:
-    """Calculate the Poisson negative log-likelihood loss.
-    
-    Remember that the loss should only be computed on the masked tokens.
-
-    Args:
-        loss: The loss function to use (nn.PoissonNLLLoss).
-        predictions: The (log of) model's predictions for the masked tokens. A tensor of shape (n_trials, nt, n_neurons).
-        spikes: The ground truth spike counts for the masked tokens. A tensor of shape (n_trials, nt, n_neurons).
-        mask: A boolean tensor of shape (n_trials, nt) indicating which tokens are masked.
-    """
-    # Implement the Poisson NLL loss calculation here
-    # Recall that the loss should only be computed on the masked tokens
-    # the loss function takes two inputs, the prediction and the spike counts.
-    loss_value = loss(predictions[mask], spikes[mask])
-    return loss_value
-
-loss = nn.PoissonNLLLoss(reduction="mean", log_input=True)
-
-torch.manual_seed(48)  # For reproducible results
 spike_log_rates = torch.randn(10, 100, 29)  # Dummy predictions
 spike_log_rates[:, :50, :] *= 0.1
 spikes = torch.poisson(torch.exp(spike_log_rates))  # Dummy ground truth
@@ -1056,97 +1005,6 @@ input = torch.randn(1, 50, 29)  # Dummy input data
 output = net(torch.randn(1, 50, 29))  # Test the forward pass with dummy data
 assert input.shape == output.shape, "Output shape does not match input shape"
 
-# %% [solution]
-class TransformerAutoencoder(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = 256,
-        num_layers: int = 4,
-        num_heads: int = 1,
-        ffn_dim: int = 256,
-        dropout: float = 0.5,
-        max_seq_len: int = 1000,
-    ):
-        super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-
-        self.pos_embedding = nn.Parameter(torch.randn(max_seq_len, hidden_dim))
-
-        # Transformer encoder layers
-        def create_encoder_layer() -> nn.TransformerEncoderLayer:
-            return nn.TransformerEncoderLayer(
-                d_model=self.hidden_dim,
-                nhead=num_heads,
-                dim_feedforward=ffn_dim,
-                dropout=dropout,
-                batch_first=True,
-                norm_first=True,
-            )
-
-        self.input_projection = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.encoder_layers = nn.ModuleList(
-            [create_encoder_layer() for _ in range(num_layers)]
-        )
-        self.norm = nn.LayerNorm(hidden_dim)
-        # This projects the output back to the input dimension
-        self.output_projection = nn.Linear(hidden_dim, input_dim)
-
-        # This is for regularization. We use dropout at multiple points in the network
-        self.reset_dropout(dropout)
-
-    def reset_dropout(self, dropout: float):
-        # This is for regularization. We use dropout at multiple points in the network. We have
-        # a separate method to easily change dropout, eventually, which will be useful for fine-tuning.
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor, return_latents=False, mask=None):
-        """
-        Forward pass of the transformer autoencoder.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, input_dim)
-            return_latents: If True, return the latents (the output of the transformer encoder)
-            mask: Optional mask tensor of shape (batch_size, seq_len) to apply to the input
-
-        Returns:
-            Reconstructed tensor of shape (batch_size, seq_len, input_dim)
-        """
-        batch_size, seq_len, feature_dim = x.shape
-
-        # Project input and add positional encoding
-        x = self.dropout(x)
-        x = math.sqrt(self.hidden_dim) * self.input_projection(
-            x
-        )
-        x += self.pos_embedding[:seq_len, :].unsqueeze(0)
-        x = self.dropout(x)
-
-        # Pass through transformer encoder layers
-        for layer in self.encoder_layers:
-            x = layer(x, mask)
-
-        x = self.norm(x)  # Final layer normalization
-        if return_latents:
-            x_latents = x.clone()  # Save latents if requested
-
-        x = self.dropout(x)
-
-        # Project back to input dimension
-        x = self.output_projection(x)
-        if return_latents:
-            return x, x_latents
-        else:
-            return x
-        
-net = TransformerAutoencoder(
-    input_dim=29
-)
-input = torch.randn(1, 50, 29)  # Dummy input data
-output = net(torch.randn(1, 50, 29))  # Test the forward pass with dummy data
-assert input.shape == output.shape, "Output shape does not match input shape"
-
 # %% [markdown]
 """
 Notice the key differences from the previous model:
@@ -1346,57 +1204,6 @@ model = TransformerWithDecoder(
 input = torch.randn(1, dataset["train_data"].shape[1], dataset["train_data"].shape[2])  # Dummy input data
 output = model(input)
 assert output.shape == (1, dataset["train_data"].shape[1], dataset["train_behavior"].shape[2]), "Output shape does not match expected behavior shape"
-
-# %% [solution]
-class TransformerWithDecoder(nn.Module):
-    """Combines pretrained PM Transformer with behavior decoder."""
-
-    def __init__(
-        self,
-        transformer: nn.Module,
-        behavior_dim: int,
-        freeze_transformer: bool = True,
-    ):
-        super().__init__()
-        self.transformer = transformer
-
-        hidden_dim = transformer.hidden_dim
-        self.decoder = nn.Linear(in_features=hidden_dim, out_features=behavior_dim)
-
-        self.set_freeze_transformer(freeze_transformer)
-
-    def set_freeze_transformer(self, freeze: bool):
-        """Freeze or unfreeze transformer parameters."""
-        for param in self.transformer.parameters():
-            param.requires_grad = not freeze
-
-        # Don't freeze the input projection layer
-        self.transformer.input_projection.weight.requires_grad = True
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x: Input spikes (B, T, neurons)
-        Returns:
-            Tuple of (reconstructed spikes, decoded behavior)
-        """
-        # Get internal representations
-        _, h = self.transformer.forward(x=x, return_latents=True)
-
-        # Decode behavior from representations
-        behavior = self.decoder(h)
-
-        return behavior
-
-model = TransformerWithDecoder(
-    transformer=net.to("cpu"),
-    behavior_dim=dataset["train_behavior"].shape[2],
-    freeze_transformer=True,  # Freeze the transformer encoder
-)
-input = torch.randn(1, dataset["train_data"].shape[1], dataset["train_data"].shape[2])  # Dummy input data
-output = model(input)
-assert output.shape == (1, dataset["train_data"].shape[1], dataset["train_behavior"].shape[2]), "Output shape does not match expected behavior shape"
-
 
 # %% [markdown]
 """
@@ -1870,18 +1677,6 @@ Implement a function that will generate a causal mask with the right entries, fo
 def get_causal_mask(seq_len: int) -> torch.Tensor:
     # Create a causal mask of shape (seq_len, seq_len)
     mask = ...
-    return mask
-
-mask = get_causal_mask(50)
-assert mask.shape == (50, 50), "Mask shape should be (seq_len, seq_len)"
-assert ((~mask & ~mask.T) == torch.eye(50)).all()
-
-# %% [solution]
-def get_causal_mask(seq_len: int) -> torch.Tensor:
-    # Create a causal mask of shape (seq_len, seq_len)
-    mask = torch.zeros((seq_len, seq_len), dtype=torch.bool)
-    for i in range(seq_len):
-        mask[i, i + 1:] = 1
     return mask
 
 mask = get_causal_mask(50)
